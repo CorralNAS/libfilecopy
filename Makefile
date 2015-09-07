@@ -8,7 +8,6 @@ INCS=   filecopy.h
 MAN=
 
 DEBUG_FLAGS = -g
-CFLAGS+=	-Wunused
 CFLAGS+=	-fblocks
 CFLAGS+= -I${.CURDIR}
 LDADD+= -lBlocksRuntime
