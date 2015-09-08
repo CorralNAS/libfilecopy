@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <err.h>
+#include <time.h>
 
 #ifdef __BLOCKS__
 # include <Block.h>
@@ -485,6 +486,35 @@ filecopy_xattrs(struct filecopy_options *opts)
 	}
 	return retval;
 }
+#if 0
+acl_func() {
+	int nfs4;
+	int acl_type;
+	acl_t new_dst_acl;
+	nfs4 = (opts->follow ? pathconf : lpathconf)(dst, _PC_ACL_NFS4);
+	acl_type = (nfs4 == 1) ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
+	orig_dst_acl = (opts->follow ? acl_get_file : acl_get_link_np)(dst, acl_type);
+	new_dst_acl = uberacl(acl_type);
+	if (new_dst_acl) {
+		int kr;
+		int brand = 0;
+		if (acl_get_brand_np(new_dst_acl, &brand) == -1) {
+			warn("Cannot get acl brand?");
+		} else {
+			warnx("ACL brand = %d", brand);
+		}
+		char *t = acl_to_text(new_dst_acl, NULL);
+		fprintf(stderr, "acl = %s\n", t);
+		kr = (opts->follow ? acl_set_file : acl_set_link_np)(dst, acl_type, new_dst_acl);
+		if (kr == -1) {
+			char *txt = acl_to_text_np(new_dst_acl, NULL, ACL_TEXT_VERBOSE | ACL_TEXT_APPEND_ID);
+			warn("Could not create ACL %s on dst %s", txt, dst);
+			acl_free((void*)txt);
+			acl_free(new_dst_acl);
+		}
+	}
+}
+#endif
 
 /*
  * Open the destination.  This is considerably trickier than
@@ -660,6 +690,7 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 	static const size_t kBufferSize = 1024 * 1024;
 	int terror = 0;
 	int retval = 0;
+	acl_t orig_acl = NULL;
 	
 	if (opts == NULL) {
 		errno = EFAULT;
@@ -694,34 +725,6 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 			goto done;
 		}
 	}
-	
-#if 0
-	int nfs4;
-	int acl_type;
-	acl_t new_dst_acl;
-	nfs4 = (opts->follow ? pathconf : lpathconf)(dst, _PC_ACL_NFS4);
-	acl_type = (nfs4 == 1) ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
-	orig_dst_acl = (opts->follow ? acl_get_file : acl_get_link_np)(dst, acl_type);
-	new_dst_acl = uberacl(acl_type);
-	if (new_dst_acl) {
-		int kr;
-		int brand = 0;
-		if (acl_get_brand_np(new_dst_acl, &brand) == -1) {
-			warn("Cannot get acl brand?");
-		} else {
-			warnx("ACL brand = %d", brand);
-		}
-		char *t = acl_to_text(new_dst_acl, NULL);
-		fprintf(stderr, "acl = %s\n", t);
-		kr = (opts->follow ? acl_set_file : acl_set_link_np)(dst, acl_type, new_dst_acl);
-		if (kr == -1) {
-			char *txt = acl_to_text_np(new_dst_acl, NULL, ACL_TEXT_VERBOSE | ACL_TEXT_APPEND_ID);
-			warn("Could not create ACL %s on dst %s", txt, dst);
-			acl_free((void*)txt);
-			acl_free(new_dst_acl);
-		}
-	}
-#endif
 	
 	/*
 	 * Copy EAs, if requested
@@ -760,6 +763,42 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 		}
 	}
 
+	if (opts->times) {
+		struct timeval atime, mtime, btime;
+		struct timeval t1[2], t2[2];
+		TIMESPEC_TO_TIMEVAL(t1 + 0, &opts->src.sbuf.st_atim); t2[0] = t1[0];
+		TIMESPEC_TO_TIMEVAL(t1 + 1, &opts->src.sbuf.st_birthtim);
+		TIMESPEC_TO_TIMEVAL(t2 + 1, &opts->src.sbuf.st_mtim);
+#ifndef O_SYMLINK
+		if (opts->dst.type == TYPE_LINK)
+			(void)lutimes(opts->dst.name, t1);
+		else
+#endif
+			(void)futimes(opts->dst.fd, t1);
+#ifdef O_SYMLINK
+		if (opts->dst.type == TYPE_LINK)
+			(void)lutimes(opts->dst.name, t2);
+		else
+#endif
+			(void)futimes(opts->dst.fd, t2);
+	}
+
+	if (opts->posix) {
+		// Set posix permissions, using chmod
+#ifndef O_SYMLINK
+		if (opts->dst.type == TYPE_LINK) {
+			(void)lchmod(opts->dst.name, opts->src.sbuf.st_mode & ~S_IFMT);
+			(void)lchown(opts->dst.name, opts->src.sbuf.st_uid, opts->src.sbuf.st_gid);
+			(void)lchflags(opts->dst.name, opts->src.sbuf.st_flags);
+		} else
+#endif
+		{
+			(void)fchmod(opts->dst.fd, opts->src.sbuf.st_mode & ~S_IFMT);
+			(void)fchown(opts->dst.fd, opts->src.sbuf.st_uid, opts->src.sbuf.st_gid);
+			(void)fchflags(opts->dst.fd, opts->src.sbuf.st_flags);
+		}
+	}
+	
 done:
 	if (data_buffer)
 		free(data_buffer);
