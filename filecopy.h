@@ -55,14 +55,15 @@ extern int *filecopy_set_block(filecopy_options_t, const char *opt, filecopy_blo
 extern filecopy_block_t filecopy_get_block(filecopy_options_t, const char *opt);
 #endif
 
-// And the options are:
-extern const char *fc_option_data;	// Boolean [aka int].  Whether or not to copy data.
-extern const char *fc_option_xattr;	// Boolean [aka int].  Whether or not to copy EAs.
-extern const char *fc_option_acl;	// Boolean [aka int].  Whether or not to copy ACLs.
-extern const char *fc_option_perms;	// Boolean [aka int].  Whether or not to copy file mode/owner/group
-extern const char *fc_option_times;	// Boolean [aka int].  Whether or not to copy files (as much as possible)
-extern const char *fc_option_recursion;	// Boolean [aka int].  Whether or not to recursively copy.
-extern const char *fc_option_follow;	// Boolean [aka int].  Whether or not to copy symlinks, or what they point to.
+// And the boolean options are :
+extern const char *fc_option_data;	// Whether or not to copy data. (default true)
+extern const char *fc_option_xattr;	// Whether or not to copy EAs. (default true)
+extern const char *fc_option_acl;	// Whether or not to copy ACLs. (default true)
+extern const char *fc_option_perms;	// Whether or not to copy file mode/owner/group (default true)
+extern const char *fc_option_times;	// Whether or not to copy files (as much as possible) (default true)
+extern const char *fc_option_recursion;	// Whether or not to recursively copy. (default false)
+extern const char *fc_option_follow;	// Whether or not to copy symlinks, or what they point to. (default true)
+extern const char *fc_option_exclusive;	// If true, fail if the target already exists (default false)
 
 extern const char *fc_option_context;	// void*.  Sets the context for callbacks.
 
