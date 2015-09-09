@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <err.h>
 
 #include "filecopy.h"
@@ -16,7 +17,17 @@ main(int ac, char **av)
 	src = av[1]; dst = av[2];
 	opts = filecopy_options_init();
 	filecopy_set_block(opts, fc_option_status_block, ^(const char *k, ...) {
-			printf("%s:  %s\n", src, k);
+			printf("%s:  %s", src, k);
+			if (k == fc_status_extattr_completion) {
+				va_list ap;
+				const char *eaname;
+				va_start(ap, k);
+				eaname = va_arg(ap, const char *);
+				if (eaname) {
+					printf(": %s", eaname);
+				}
+			}
+			printf("\n");
 			return FC_CONTINUE;
 		});
 

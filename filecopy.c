@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -111,6 +112,44 @@ DECL(fc_error_extattr);
 DECL(fc_status_extattr);
 DECL(fc_status_extattr_completion);
 
+int
+filecopy_set_option(filecopy_options_t o, const char *opt, ...)
+{
+	struct filecopy_options *opts = (void*)o;
+	va_list ap;
+	const char *optname;
+	int rv = 0;
+	
+	va_start(ap, opt);
+
+	while ((optname = va_arg(ap, const char *)) != NULL) {
+		if (optname == fc_option_data ||
+		    optname == fc_option_xattr ||
+		    optname == fc_option_acl ||
+		    optname == fc_option_perms ||
+		    optname == fc_option_times ||
+		    optname == fc_option_recursion ||
+		    optname == fc_option_follow ||
+		    optname == fc_option_exclusive) {
+			rv = filecopy_set_bool(opts, optname, va_arg(ap, int));
+		} else if (optname == fc_option_context) {
+			opts->context = va_arg(ap, void *);
+			rv = 0;
+		} else if (optname == fc_option_status_cb ||
+			   optname == fc_option_error_cb) {
+			rv = filecopy_set_callback(opts, optname, va_arg(ap, filecopy_callback_t));
+		} else if (optname == fc_option_status_block ||
+			   optname == fc_option_error_block) {
+			rv = filecopy_set_block(opts, optname, va_arg(ap, filecopy_block_t));
+		} else {
+			rv = EINVAL;
+		}
+		if (rv != 0)
+			break;
+	}
+	return rv;
+}
+
 filecopy_options_t
 filecopy_options_init(void)
 {
@@ -137,16 +176,40 @@ filecopy_options_release(filecopy_options_t o)
 	free(opts);
 }
 
+int
+filecopy_set_callback(filecopy_options_t o, const char *opt, filecopy_callback_t cb)
+{
+	struct filecopy_options *opts = (void*)o;
+	if (opt == fc_option_status_cb) {
+		opts->statuscb = cb;
+		if (opts->status_b) {
+			Block_release(opts->status_b);
+			opts->status_b = NULL;
+		}
+	} else if (opt == fc_option_error_cb) {
+		opts->errorcb = cb;
+		if (opts->error_b) {
+			Block_release(opts->error_b);
+			opts->error_b = NULL;
+		}
+	} else {
+		return EINVAL;
+	}
+	return 0;
+}
+
 #ifdef __BLOCKS__
 int
 filecopy_set_block(filecopy_options_t o, const char *opt, filecopy_block_t b)
 {
 	struct filecopy_options *opts = (void*)o;
-	if (opt == fc_option_status_block)
+	if (opt == fc_option_status_block) {
 		opts->status_b = Block_copy(b);
-	else if (opt == fc_option_error_block)
+		opts->statuscb = NULL;
+	} else if (opt == fc_option_error_block) {
 		opts->error_b = Block_copy(b);
-	else
+		opts->errorcb = NULL;
+	} else
 		return EINVAL;
 	return 0;
 }
@@ -286,17 +349,17 @@ create_dst(const char *file)
 }
 
 #ifdef __BLOCKS__
-static int
+static filecopy_status_t
 iterate_xattrs(int fd,
 	       int ns,
-	       int (^handler)(const char *eaname))
+	       filecopy_status_t (^handler)(const char *eaname))
 {
 	ssize_t kr;
-	int retval = 0;
+	filecopy_status_t retval = FC_CONTINUE;
 	
 	kr = extattr_list_fd(fd, ns, NULL, 0);
 	if (kr == -1) {
-		return kr;
+		return FC_ABORT;
 	}
 	if (kr > 0) {
 		char *buffer;
@@ -308,20 +371,20 @@ iterate_xattrs(int fd,
 		
 		buffer = malloc(bufsize);
 		if (buffer == NULL)
-			return -1;
+			return FC_ABORT;
 		
 		kr = extattr_list_fd(fd, ns, buffer, bufsize);
 		if (kr == -1) {
 			free(buffer);
-			return kr;
+			return FC_ABORT;
 		}
 		for (bufptr = (void*)buffer;
 		     (void*)bufptr < (void*)(buffer + bufsize);
 		     bufptr = (void*)((char*)bufptr + bufptr->len + 1)) {
 			char eaname[bufptr->len + 1];
 			strlcpy(eaname, (const char*)bufptr->name, sizeof(eaname));
-			if (handler(eaname) == -1) {
-				retval = -1;
+			retval = handler(eaname);
+			if (retval == FC_ABORT || retval == FC_SKIP) {
 				break;
 			}
 		}
@@ -349,14 +412,13 @@ iterate_xattrs(int fd,
  * function/callback will be invoked, and can also skip, abort, or
  * or continue.  skip and continue are the same, in this context.
  */
-static int
-filecopy_xattrs(struct filecopy_options *opts)
+static filecopy_status_t
+copy_xattrs(struct filecopy_options *opts)
 {
 	int src_fd = opts->src.fd;
 	int dst_fd = opts->dst.fd;
 	filecopy_status_t cb_status;
-	
-	int retval = 0;
+	filecopy_status_t retval = FC_CONTINUE;
 	char *buffer = NULL;
 	size_t bufsize;
 	struct ea_ns {
@@ -378,13 +440,16 @@ filecopy_xattrs(struct filecopy_options *opts)
 	} else {
 		cb_status = FC_CONTINUE;
 	}
-	if (cb_status == FC_ABORT) {
+	switch (cb_status) {
+	case FC_ABORT:
+	case FC_SKIP:
 		errno = 0;
-		return -1;
-	} else if (cb_status == FC_SKIP) {
-		// Don't know why you'd do this
-		errno = 0;
-		return 0;
+		return cb_status;
+	default:
+		errno = EINVAL;
+		return FC_ABORT;
+	case FC_CONTINUE:
+		break;
 	}
 
 	// Remove all EAs from the destination
@@ -397,19 +462,16 @@ filecopy_xattrs(struct filecopy_options *opts)
 					     int status = extattr_delete_fd(dst_fd, ptr->ns_id, eaname);
 					     if (status == -1) {
 						     warn("Could not delete EA %s:%s from %s", ptr->ns_name, eaname, opts->dst.name);
-						     return status;
+						     return FC_ABORT;
 					     }
-					     return 0;
+					     return FC_CONTINUE;
 				     });
 	}
 	// Now we copy from src to dst!  Easy as pie!
 	for (ptr = namespaces; ptr->ns_name; ptr++) {
-		int kr;
-
-		kr = iterate_xattrs(src_fd, ptr->ns_id, ^(const char *eaname) {
+		retval = iterate_xattrs(src_fd, ptr->ns_id, ^(const char *eaname) {
 				ssize_t bufsize;
 				filecopy_status_t fstatus = FC_CONTINUE;
-				int retval;
 				
 				if (opts->statuscb) {
 					fstatus = (opts->statuscb)(fc_status_extattr,
@@ -429,9 +491,9 @@ filecopy_xattrs(struct filecopy_options *opts)
 				default:
 				case FC_ABORT:
 					errno = 0;
-					return -1;
+					return fstatus;
 				case FC_SKIP:
-					return 0;	// Return from the block
+					return FC_SKIP;	// Return from the block
 				case FC_CONTINUE:
 					break;
 				}
@@ -457,9 +519,8 @@ filecopy_xattrs(struct filecopy_options *opts)
 					switch (estatus) {		\
 					default:			\
 					case FC_ABORT:			\
-						return -1;		\
 					case FC_SKIP:			\
-						return 0;		\
+						return estatus;		\
 					case FC_CONTINUE:		\
 						break;			\
 					}				\
@@ -467,10 +528,9 @@ filecopy_xattrs(struct filecopy_options *opts)
 				if (bufsize == -1) {
 					CHECK_ERROR(opts->errorcb, opts->error_b);
 				} else if (bufsize > 0) {
-					int retval;
 					char *buffer = malloc(bufsize);
 					if (buffer == NULL) {
-						return -1;
+						return FC_ABORT;
 					} else {
 						int status;
 
@@ -482,7 +542,7 @@ filecopy_xattrs(struct filecopy_options *opts)
 
 							if (status == -1) {
 								CHECK_ERROR(opts->errorcb, opts->error_b);
-								retval = -1;
+								fstatus = FC_ABORT;
 							} else {
 								filecopy_status_t status = FC_CONTINUE;
 								if (opts->statuscb)
@@ -495,61 +555,59 @@ filecopy_xattrs(struct filecopy_options *opts)
 								switch (status) {
 								case FC_ABORT:
 									errno = 0;
-									retval = -1;
+									fstatus = status;
 									break;
 								case FC_SKIP:
 								case FC_CONTINUE:
 									errno = 0;
-									retval = 0;
+									fstatus = status;
 									break;
 								default:
 									errno = EINVAL;
-									retval = -1;
+									fstatus = FC_ABORT;
 									break;
 								}
 							}
 						}
 						free(buffer);
 					}
-					return retval;
+					return fstatus;
 				}
 			done:
-				return retval;
+				return fstatus;
 			});
 #undef CHECK_ERROR
 		
-		if (kr == -1) {
-			if (errno == EPERM && ptr->perm_req)
-				continue;
-			if (errno == ENOATTR) {
-				// This means an EA disappeared.  Sorry, but not an error.
+		if (retval == FC_ABORT) {
+			if (errno == EPERM && ptr->perm_req) {
+				retval = FC_CONTINUE;
 				continue;
 			}
-			retval = -1;
+			if (errno == ENOATTR) {
+				// This means an EA disappeared.  Sorry, but not an error.
+				retval = FC_CONTINUE;
+				continue;
+			}
 			break;
 		}
 	}
-	if (retval != -1) {
-		filecopy_status_t status = FC_CONTINUE;
-
+	if (retval == FC_CONTINUE) {
 		if (opts->statuscb)
-			status = (opts->statuscb)(fc_status_extattr_completion,
+			retval = (opts->statuscb)(fc_status_extattr_completion,
 						  opts->context,
 						  NULL);
 		else if (opts->status_b)
-			status = (opts->status_b)(fc_status_extattr_completion, NULL);
-		switch (status) {
+			retval = (opts->status_b)(fc_status_extattr_completion, NULL);
+		switch (retval) {
 		case FC_ABORT:
 			errno = 0;
-			retval = -1;
 			break;
 		case FC_SKIP:
 		case FC_CONTINUE:
-			retval = 0;
 			break;
 		default:
 			errno = EINVAL;
-			retval = -1;
+			retval = FC_ABORT;
 			break;
 		}
 	}
@@ -730,14 +788,13 @@ open_source(struct filecopy_options *opts, const char *name)
 	}
 }
 
-static int
+static filecopy_status_t
 copy_data(struct filecopy_options *opts)
 {
 	ssize_t nr, nw;
 	off_t total = 0;
 	int terror = 0;
-	filecopy_status_t status;
-	int retval = 0;
+	filecopy_status_t status = FC_CONTINUE;
 	
 	if (opts->statuscb)
 		status = (opts->statuscb)(fc_status_data_start, opts->context);
@@ -748,12 +805,12 @@ copy_data(struct filecopy_options *opts)
 	switch (status) {
 	case FC_ABORT:
 		errno = 0;
-		return -1;
+		return status;
 	default:
 		errno = EINVAL;
-		return -1;
+		return FC_ABORT;
 	case FC_SKIP:
-		return 0;
+		return FC_SKIP;
 	case FC_CONTINUE:
 		break;
 	}
@@ -773,16 +830,12 @@ copy_data(struct filecopy_options *opts)
 			status = FC_CONTINUE;
 		switch (status) {
 		case FC_ABORT:
-			errno = 0;
-			retval = -1;
-			goto done;
 		case FC_SKIP:
 			errno = 0;
-			retval = 0;
 			goto done;
 		default:
 			errno = EINVAL;
-			retval = -1;
+			status = FC_ABORT;
 			goto done;
 		case FC_CONTINUE:
 			break;
@@ -791,16 +844,18 @@ copy_data(struct filecopy_options *opts)
 		if (nw == -1) {
 			terror = errno;
 			warn("Could not write data");
-			retval = -1;
+			// Actually need to call the error handler here
+			status = FC_ABORT;
 			break;
 		}
 	}
 	if (nr == -1) {
 		terror = errno;
-		retval = -1;
+		// Actually need to call the error handler here
+		status = FC_ABORT;
 		warn("Could not read data");
 	}
-	if (retval == -1) {
+	if (status == FC_ABORT && terror != 0) {
 		if (opts->errorcb)
 			status = (opts->errorcb)(fc_error_data,
 						 opts->context,
@@ -813,19 +868,16 @@ copy_data(struct filecopy_options *opts)
 		switch (status) {
 		case FC_ABORT:
 			errno = terror;
-			retval = -1;
 			break;
 		case FC_SKIP:
 			errno = 0;
-			retval = -1;
 			break;
 		case FC_CONTINUE:
 			errno = 0;
-			retval = 0;
 			break;
 		default:
 			errno = EINVAL;
-			retval = -1;
+			status = FC_ABORT;
 			break;
 		}
 	} else {
@@ -839,22 +891,20 @@ copy_data(struct filecopy_options *opts)
 			status = FC_CONTINUE;
 		switch (status) {
 		case FC_ABORT:
-			retval = -1;
 			errno = 0;
 			break;
 		default:
 			errno = EINVAL;
-			retval = -1;
+			status = FC_ABORT;
 			break;
 		case FC_SKIP:
 		case FC_CONTINUE:
 			errno = 0;
-			retval = 0;
 			break;
 		}
 	}
 done:
-	return retval;
+	return status;
 }
 
 static void
@@ -867,6 +917,47 @@ close_files(struct filecopy_options *opts)
 		close(opts->dst.fd);
 	}
 	return;
+}
+
+static int
+copy_posix(struct filecopy_options *opts)
+{
+#ifndef O_SYMLINK
+	if (opts->dst.type == TYPE_LINK) {
+		(void)lchmod(opts->dst.name, opts->src.sbuf.st_mode & ~S_IFMT);
+		(void)lchown(opts->dst.name, opts->src.sbuf.st_uid, opts->src.sbuf.st_gid);
+		(void)lchflags(opts->dst.name, opts->src.sbuf.st_flags);
+	} else
+#endif
+	{
+		(void)fchmod(opts->dst.fd, opts->src.sbuf.st_mode & ~S_IFMT);
+		(void)fchown(opts->dst.fd, opts->src.sbuf.st_uid, opts->src.sbuf.st_gid);
+		(void)fchflags(opts->dst.fd, opts->src.sbuf.st_flags);
+	}
+	return 0;
+}
+
+static int
+copy_times(struct filecopy_options *opts)
+{
+	struct timeval atime, mtime, btime;
+	struct timeval t1[2], t2[2];
+	TIMESPEC_TO_TIMEVAL(t1 + 0, &opts->src.sbuf.st_atim); t2[0] = t1[0];
+	TIMESPEC_TO_TIMEVAL(t1 + 1, &opts->src.sbuf.st_birthtim);
+	TIMESPEC_TO_TIMEVAL(t2 + 1, &opts->src.sbuf.st_mtim);
+#ifndef O_SYMLINK
+	if (opts->dst.type == TYPE_LINK)
+		(void)lutimes(opts->dst.name, t1);
+	else
+#endif
+		(void)futimes(opts->dst.fd, t1);
+#ifdef O_SYMLINK
+	if (opts->dst.type == TYPE_LINK)
+		(void)lutimes(opts->dst.name, t2);
+	else
+#endif
+		(void)futimes(opts->dst.fd, t2);
+	return 0;
 }
 
 /*
@@ -917,15 +1008,21 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 	 * metadata, we can do any combination.
 	 */
 	if (opts->data) {
-		int kr;
+		filecopy_status_t kr;	// Kopy Result
 		if (opts->src.type != opts->dst.type) {
 			terror = EINVAL;
 			goto done;
 		}
-		kr = copy_data(opts);
-		if (kr == -1) {
-			terror = errno;
-			goto done;
+		/*
+		 * We can only copy data for files.
+		 * Symlinks were created in open_dest().
+		 */
+		if (opts->src.type == TYPE_FILE) {
+			kr = copy_data(opts);
+			if (kr == FC_ABORT) {
+				terror = errno;
+				goto done;
+			}
 		}
 	}
 	
@@ -933,56 +1030,20 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 	 * Copy EAs, if requested
 	 */
 	if (opts->xattr) {
-		int kr = filecopy_xattrs(opts);
-		if (kr == -1) {
+		filecopy_status_t kr = copy_xattrs(opts);
+		if (kr == FC_ABORT) {
 			terror = errno;
 			warn("Could not copy xattrs");
 			goto done;
 		}
 	}
-	/*
-	 * Next, copy data if requested.
-	 * We only copy data for regular files.  Symlinks
-	 * are created as a copy, and directories only get
-	 * metadata copied.
-	 */
-	if (opts->data && opts->src.type == TYPE_FILE) {
-	}
 
 	if (opts->times) {
-		struct timeval atime, mtime, btime;
-		struct timeval t1[2], t2[2];
-		TIMESPEC_TO_TIMEVAL(t1 + 0, &opts->src.sbuf.st_atim); t2[0] = t1[0];
-		TIMESPEC_TO_TIMEVAL(t1 + 1, &opts->src.sbuf.st_birthtim);
-		TIMESPEC_TO_TIMEVAL(t2 + 1, &opts->src.sbuf.st_mtim);
-#ifndef O_SYMLINK
-		if (opts->dst.type == TYPE_LINK)
-			(void)lutimes(opts->dst.name, t1);
-		else
-#endif
-			(void)futimes(opts->dst.fd, t1);
-#ifdef O_SYMLINK
-		if (opts->dst.type == TYPE_LINK)
-			(void)lutimes(opts->dst.name, t2);
-		else
-#endif
-			(void)futimes(opts->dst.fd, t2);
+		(void)copy_times(opts);
 	}
 
 	if (opts->posix) {
-		// Set posix permissions, using chmod
-#ifndef O_SYMLINK
-		if (opts->dst.type == TYPE_LINK) {
-			(void)lchmod(opts->dst.name, opts->src.sbuf.st_mode & ~S_IFMT);
-			(void)lchown(opts->dst.name, opts->src.sbuf.st_uid, opts->src.sbuf.st_gid);
-			(void)lchflags(opts->dst.name, opts->src.sbuf.st_flags);
-		} else
-#endif
-		{
-			(void)fchmod(opts->dst.fd, opts->src.sbuf.st_mode & ~S_IFMT);
-			(void)fchown(opts->dst.fd, opts->src.sbuf.st_uid, opts->src.sbuf.st_gid);
-			(void)fchflags(opts->dst.fd, opts->src.sbuf.st_flags);
-		}
+		copy_posix(opts);
 	}
 	
 done:
