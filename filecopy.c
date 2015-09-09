@@ -342,6 +342,149 @@ uberacl(int type)
 	return acl;
 }
 
+static acl_t
+get_acl(struct file_state *state)
+{
+	int nfs4;
+	int acl_type;
+	acl_t retval = NULL;
+	
+#ifndef O_SYMLINK
+	if (state->type == TYPE_LINK)
+		nfs4 = lpathconf(state->name, _PC_ACL_NFS4);
+	else
+#endif
+		nfs4 = fpathconf(state->fd, _PC_ACL_NFS4);
+
+	acl_type = (nfs4 == 1) ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
+#ifndef O_SYMLINK
+	if (state->type == TYPE_LINK)
+		retval = acl_get_link_np(state->name, acl_type);
+	else
+#endif
+		retval = acl_get_fd_np(state->fd, acl_type);
+	return retval;
+}
+
+static filecopy_status_t
+copy_acl(struct filecopy_options *opts)
+{
+	filecopy_status_t retval = FC_CONTINUE;
+	acl_t src_acl, dst_acl;
+	acl_t new_acl = NULL;
+	acl_entry_t ace;
+	int ace_id;
+	size_t ace_index = 1;
+	int acl_type = 0;
+	
+	/*
+	 * Need to get the ACL from the source _and_ destination.
+	 */
+	src_acl = get_acl(&opts->src);
+	dst_acl = get_acl(&opts->dst);
+	
+	if (src_acl == NULL && dst_acl == NULL)
+		goto done;
+	
+	// Need to figure out what kind of ACL to use.
+#ifdef O_SYMLINK
+	if (opts->dst.type == TYPE_LINK)
+		acl_type = lpathconf(opts->dst.name, _PC_ACL_NFS4) == 1 ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
+	else
+#endif
+		acl_type = fpathconf(opts->dst.fd, _PC_ACL_NFS4) == 1 ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
+	new_acl = uberacl(acl_type);
+	if (new_acl == NULL) {
+		retval = FC_ABORT;
+		goto done;
+	}
+	
+	/*
+	 * The purpose of this block is to to through the ACL on
+	 * the source, and add entries to the new ACL.
+	 * If ACL_ENTRY_INHERITED is exposed, we'll skip those entries.
+	 */
+	/*
+	 * XXX note about copying ACL entries:  we support two kinds,
+	 * POSIX and NFSv4. I am doing no translation between them, which
+	 * I suspect means problems when copying between filesystems.
+	 * Investigate this.
+	 */
+	if (src_acl) {
+		for (ace_id = ACL_FIRST_ENTRY;
+		     acl_get_entry(src_acl, ace_id, &ace) == 1;
+		     ace_id = ACL_NEXT_ENTRY) {
+			acl_entry_t tmp;
+#ifdef ACL_ENTRY_INHERITED
+			acl_flagset_t flags;
+			if (acl_get_flaget_np(ace, &flags) != -1)
+				if (acl_get_flag_np(flags, ACL_ENTRY_INHERITED) == 0)
+#endif
+					// Note how I'm cleverly not checking for errors
+					acl_create_entry_np(&new_acl, &tmp, ace_index++);
+			acl_copy_entry(tmp, ace);
+
+		}
+	}
+#ifdef ACL_ENTRY_INHERITED
+	/*
+	 * The purpose of this block is to go through the ACL on
+	 * the destination, and add on the inherited entries.
+	 * This is only possible if ACL_ENTRY_INHERITED is exposed.
+	 */
+	if (dst_acl) {
+		for (ace_id = ACL_FIRST_ENTRY;
+		     acl_get_entry(dst_acl, ace_id, &ace) == 1;
+		     ace_id = ACL_NEXT_ENTRY) {
+			acl_flagset_t flags;
+			if (acl_get_flagset_np(ace, &flags) != -1) {
+				if (acl_get_flag_np(flags, ACL_ENTRY_INHERITED) == 1) {
+					acl_create_entry(&new_acl, &ace);
+					ace_index++;
+				}
+			}
+		}
+	}
+
+#endif
+	if (ace_index > 1) {
+		// There are actually some ACLs
+		int nfs4;
+		int kr;
+		kr = acl_delete_entry_np(new_acl, 0);
+		if (kr == -1) {
+			warn("Could not remove uberace");
+		}
+#ifndef O_SYMLINK
+		if (opts->dst.type == TYPE_LINK)
+			nfs4 = lpathconf(opts->dst.name, _PC_ACL_NFS4);
+		else
+#endif
+			nfs4 = fpathconf(opts->dst.fd, _PC_ACL_NFS4);
+		acl_type = (nfs4 == 1) ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
+		acl_type = 0;
+#ifndef O_SYMLINK
+		if (opts->dst.type == TYPE_LINK)
+			kr = acl_set_link_np(opts->dst.name, new_acl, acl_type);
+		else
+#endif
+			kr = acl_set_fd_np(opts->dst.fd, new_acl, ACL_TYPE_NFS4/*acl_type*/);
+		if (kr == -1) {
+			warn("Could not set new ACL on destination");
+			retval = FC_ABORT;
+		}
+	}
+done:
+	if (src_acl)
+		acl_free(src_acl);
+	if (dst_acl)
+		acl_free(dst_acl);
+	if (new_acl)
+		acl_free(new_acl);
+	
+	return retval;
+}
+
 static int
 create_dst(const char *file)
 {
@@ -1038,14 +1181,18 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 		}
 	}
 
-	if (opts->times) {
-		(void)copy_times(opts);
-	}
-
 	if (opts->posix) {
 		copy_posix(opts);
 	}
 	
+	if (opts->acl) {
+		copy_acl(opts);
+	}
+	
+	if (opts->times) {
+		(void)copy_times(opts);
+	}
+
 done:
 	if (opts->buffer)
 		free(opts->buffer);
