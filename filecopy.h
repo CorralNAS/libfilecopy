@@ -51,7 +51,7 @@ extern int filecopy_set_callback(filecopy_options_t, const char *opt, filecopy_c
 extern filecopy_callback_t *filecopy_get_callback(filecopy_options_t, const char *opt);
 
 # ifdef __BLOCKS__
-extern int *filecopy_set_block(filecopy_options_t, const char *opt, filecopy_block_t);
+extern int filecopy_set_block(filecopy_options_t, const char *opt, filecopy_block_t);
 extern filecopy_block_t filecopy_get_block(filecopy_options_t, const char *opt);
 #endif
 
@@ -83,6 +83,7 @@ extern const char *fc_option_error_cb;
 /*
  * Option to set a status block.  Other than the context parameter,
  * this is identical to the status callback.  (That is, where a
+b
  * callback would be (*cb)(name, context, ...), the block is
  * (*b)(name, ...).)
  */
@@ -143,8 +144,8 @@ extern const char *fc_error_preparation;
  * (*cb)(fc_error_data, context, off_t copied, int errno)
  * FC_ABORT causes the function to exit (with errno set to the
  * same value as the callback was given); FC_SKIP causes the
- * function to exit with no error, while FC_CONTINUE causes it
- * to continue trying to copy the rest of the stages.
+ * function to stop copying data with no error, while FC_CONTINUE
+ * causes it to continue trying to copy the rest of the stages.
  */
 extern const char *fc_error_data;
 

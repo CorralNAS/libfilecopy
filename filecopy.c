@@ -137,6 +137,21 @@ filecopy_options_release(filecopy_options_t o)
 	free(opts);
 }
 
+#ifdef __BLOCKS__
+int
+filecopy_set_block(filecopy_options_t o, const char *opt, filecopy_block_t b)
+{
+	struct filecopy_options *opts = (void*)o;
+	if (opt == fc_option_status_block)
+		opts->status_b = Block_copy(b);
+	else if (opt == fc_option_error_block)
+		opts->error_b = Block_copy(b);
+	else
+		return EINVAL;
+	return 0;
+}
+#endif
+
 int
 filecopy_set_int(filecopy_options_t o, const char *opt, int v)
 {
@@ -464,8 +479,35 @@ filecopy_xattrs(struct filecopy_options *opts)
 							CHECK_ERROR(opts->errorcb, opts->error_b);
 						} else {
 							status = extattr_set_fd(dst_fd, ptr->ns_id, eaname, buffer, bufsize);
-							if (status == -1)
+
+							if (status == -1) {
+								CHECK_ERROR(opts->errorcb, opts->error_b);
 								retval = -1;
+							} else {
+								filecopy_status_t status = FC_CONTINUE;
+								if (opts->statuscb)
+									status = (opts->statuscb)(fc_status_extattr_completion,
+												  opts->context,
+												  eaname);
+								else if (opts->status_b)
+									status = (opts->status_b)(fc_status_extattr_completion,
+												  eaname);
+								switch (status) {
+								case FC_ABORT:
+									errno = 0;
+									retval = -1;
+									break;
+								case FC_SKIP:
+								case FC_CONTINUE:
+									errno = 0;
+									retval = 0;
+									break;
+								default:
+									errno = EINVAL;
+									retval = -1;
+									break;
+								}
+							}
 						}
 						free(buffer);
 					}
@@ -483,6 +525,30 @@ filecopy_xattrs(struct filecopy_options *opts)
 				// This means an EA disappeared.  Sorry, but not an error.
 				continue;
 			}
+			retval = -1;
+			break;
+		}
+	}
+	if (retval != -1) {
+		filecopy_status_t status = FC_CONTINUE;
+
+		if (opts->statuscb)
+			status = (opts->statuscb)(fc_status_extattr_completion,
+						  opts->context,
+						  NULL);
+		else if (opts->status_b)
+			status = (opts->status_b)(fc_status_extattr_completion, NULL);
+		switch (status) {
+		case FC_ABORT:
+			errno = 0;
+			retval = -1;
+			break;
+		case FC_SKIP:
+		case FC_CONTINUE:
+			retval = 0;
+			break;
+		default:
+			errno = EINVAL;
 			retval = -1;
 			break;
 		}
@@ -670,23 +736,125 @@ copy_data(struct filecopy_options *opts)
 	ssize_t nr, nw;
 	off_t total = 0;
 	int terror = 0;
-
+	filecopy_status_t status;
+	int retval = 0;
+	
+	if (opts->statuscb)
+		status = (opts->statuscb)(fc_status_data_start, opts->context);
+	else if (opts->status_b)
+		status = (opts->status_b)(fc_status_data_start);
+	else
+		status = FC_CONTINUE;
+	switch (status) {
+	case FC_ABORT:
+		errno = 0;
+		return -1;
+	default:
+		errno = EINVAL;
+		return -1;
+	case FC_SKIP:
+		return 0;
+	case FC_CONTINUE:
+		break;
+	}
+	
 	while ((nr = read(opts->src.fd, opts->buffer, opts->bufsize)) > 0) {
 		total += nr;
+		if (opts->statuscb)
+			status = (opts->statuscb)(fc_status_data_progress,
+						  opts->context,
+						  opts->src.sbuf.st_size,
+						  total);
+		else if (opts->status_b)
+			status = (opts->status_b)(fc_status_data_progress,
+						  opts->src.sbuf.st_size,
+						  total);
+		else
+			status = FC_CONTINUE;
+		switch (status) {
+		case FC_ABORT:
+			errno = 0;
+			retval = -1;
+			goto done;
+		case FC_SKIP:
+			errno = 0;
+			retval = 0;
+			goto done;
+		default:
+			errno = EINVAL;
+			retval = -1;
+			goto done;
+		case FC_CONTINUE:
+			break;
+		}
 		nw = write(opts->dst.fd, opts->buffer, nr);
 		if (nw == -1) {
 			terror = errno;
 			warn("Could not write data");
-			return -1;
+			retval = -1;
+			break;
 		}
 	}
 	if (nr == -1) {
 		terror = errno;
+		retval = -1;
 		warn("Could not read data");
-		return -1;
 	}
-	return 0;
-	
+	if (retval == -1) {
+		if (opts->errorcb)
+			status = (opts->errorcb)(fc_error_data,
+						 opts->context,
+						 terror);
+		else if (opts->error_b)
+			status = (opts->error_b)(fc_error_data, terror);
+		else
+			status = FC_ABORT;
+
+		switch (status) {
+		case FC_ABORT:
+			errno = terror;
+			retval = -1;
+			break;
+		case FC_SKIP:
+			errno = 0;
+			retval = -1;
+			break;
+		case FC_CONTINUE:
+			errno = 0;
+			retval = 0;
+			break;
+		default:
+			errno = EINVAL;
+			retval = -1;
+			break;
+		}
+	} else {
+		if (opts->statuscb)
+			status = (opts->statuscb)(fc_status_data_completion,
+						  opts->context,
+						  total);
+		else if (opts->status_b)
+			status = (opts->status_b)(fc_status_data_completion, total);
+		else
+			status = FC_CONTINUE;
+		switch (status) {
+		case FC_ABORT:
+			retval = -1;
+			errno = 0;
+			break;
+		default:
+			errno = EINVAL;
+			retval = -1;
+			break;
+		case FC_SKIP:
+		case FC_CONTINUE:
+			errno = 0;
+			retval = 0;
+			break;
+		}
+	}
+done:
+	return retval;
 }
 
 static void
