@@ -54,8 +54,11 @@ struct filecopy_options {
 	void *status_b;
 	void *error_b;
 #endif
+	// The following are used for context during operations
 	struct file_state src;
 	struct file_state dst;
+	size_t bufsize;
+	char *buffer;
 };
 
 static struct filecopy_options options_default = {
@@ -661,6 +664,31 @@ open_source(struct filecopy_options *opts, const char *name)
 	}
 }
 
+static int
+copy_data(struct filecopy_options *opts)
+{
+	ssize_t nr, nw;
+	off_t total = 0;
+	int terror = 0;
+
+	while ((nr = read(opts->src.fd, opts->buffer, opts->bufsize)) > 0) {
+		total += nr;
+		nw = write(opts->dst.fd, opts->buffer, nr);
+		if (nw == -1) {
+			terror = errno;
+			warn("Could not write data");
+			return -1;
+		}
+	}
+	if (nr == -1) {
+		terror = errno;
+		warn("Could not read data");
+		return -1;
+	}
+	return 0;
+	
+}
+
 static void
 close_files(struct filecopy_options *opts)
 {
@@ -698,11 +726,12 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 	}
 
 	if (opts->data) {
-		data_buffer = malloc(kBufferSize);
-		if (data_buffer == NULL) {
+		opts->buffer = malloc(kBufferSize);
+		if (opts->buffer == NULL) {
 			terror = ENOMEM;
 			goto done;
 		}
+		opts->bufsize = kBufferSize;
 	}
 	
 	if (open_source(opts, src) == -1) {
@@ -720,8 +749,14 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 	 * metadata, we can do any combination.
 	 */
 	if (opts->data) {
+		int kr;
 		if (opts->src.type != opts->dst.type) {
 			terror = EINVAL;
+			goto done;
+		}
+		kr = copy_data(opts);
+		if (kr == -1) {
+			terror = errno;
 			goto done;
 		}
 	}
@@ -744,23 +779,6 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 	 * metadata copied.
 	 */
 	if (opts->data && opts->src.type == TYPE_FILE) {
-		ssize_t nr, nw;
-		off_t total = 0;
-
-		while ((nr = read(opts->src.fd, data_buffer, kBufferSize)) > 0) {
-			total += nr;
-			nw = write(opts->dst.fd, data_buffer, nr);
-			if (nw == -1) {
-				terror = errno;
-				warn("Could not write data");
-				goto done;
-			}
-		}
-		if (nr == -1) {
-			terror = errno;
-			warn("Could not read data");
-			goto done;
-		}
 	}
 
 	if (opts->times) {
@@ -800,8 +818,8 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 	}
 	
 done:
-	if (data_buffer)
-		free(data_buffer);
+	if (opts->buffer)
+		free(opts->buffer);
 	close_files(opts);
 	if (terror) {	// Indicates an error
 		if (opts->dst.flags & FLAG_CREATED)
