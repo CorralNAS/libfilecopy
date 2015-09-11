@@ -81,7 +81,7 @@ static struct filecopy_options options_default = {
 };
 	
 //#define DECL(name) const char *name __attribute__((section(".rodata"))) = #name
-#define DECL(name) const char *name = #name
+#define DECL(name) const char *const name = #name
 DECL(fc_option_data);
 DECL(fc_option_xattr);
 DECL(fc_option_acl);

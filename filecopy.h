@@ -56,28 +56,28 @@ extern filecopy_block_t filecopy_get_block(filecopy_options_t, const char *opt);
 #endif
 
 // And the boolean options are :
-extern const char *fc_option_data;	// Whether or not to copy data. (default true)
-extern const char *fc_option_xattr;	// Whether or not to copy EAs. (default true)
-extern const char *fc_option_acl;	// Whether or not to copy ACLs. (default true)
-extern const char *fc_option_perms;	// Whether or not to copy file mode/owner/group (default true)
-extern const char *fc_option_times;	// Whether or not to copy files (as much as possible) (default true)
-extern const char *fc_option_recursion;	// Whether or not to recursively copy. (default false)
-extern const char *fc_option_follow;	// Whether or not to copy symlinks, or what they point to. (default true)
-extern const char *fc_option_exclusive;	// If true, fail if the target already exists (default false)
+extern const char *const fc_option_data;	// Whether or not to copy data. (default true)
+extern const char *const fc_option_xattr;	// Whether or not to copy EAs. (default true)
+extern const char *const fc_option_acl;	// Whether or not to copy ACLs. (default true)
+extern const char *const fc_option_perms;	// Whether or not to copy file mode/owner/group (default true)
+extern const char *const fc_option_times;	// Whether or not to copy files (as much as possible) (default true)
+extern const char *const fc_option_recursion;	// Whether or not to recursively copy. (default false)
+extern const char *const fc_option_follow;	// Whether or not to copy symlinks, or what they point to. (default true)
+extern const char *const fc_option_exclusive;	// If true, fail if the target already exists (default false)
 
-extern const char *fc_option_context;	// void*.  Sets the context for callbacks.
+extern const char *const fc_option_context;	// void*.  Sets the context for callbacks.
 
 /*
  * Option to set a status callback.  This includes preparation, start,
  * progress, and completion.  All status callbacks use this.
  */
-extern const char *fc_option_status_cb;
+extern const char *const fc_option_status_cb;
 
 /*
  * Option to set an error callback.  This can happen during preparation or
  * in the middle of an operation.  All error callbacks use this.
  */
-extern const char *fc_option_error_cb;
+extern const char *const fc_option_error_cb;
 
 #ifdef __BLOCKS__
 /*
@@ -87,13 +87,13 @@ b
  * callback would be (*cb)(name, context, ...), the block is
  * (*b)(name, ...).)
  */
-extern const char *fc_option_status_block;
+extern const char *const fc_option_status_block;
 
 /*
  * Option to set an error block.  Other than the context parameter,
  * this is identical to the error callback.
  */
-extern const char *fc_option_error_block;
+extern const char *const fc_option_error_block;
 #endif
 
 /*
@@ -109,7 +109,7 @@ extern const char *fc_option_error_block;
  * the function will return -1), FC_SKIP to skip copying the
  * data, and FC_CONTINUE to keep going.
  */
-extern const char *fc_status_data_start;
+extern const char *const fc_status_data_start;
 
 /*
  * Data copy progress.
@@ -119,7 +119,7 @@ extern const char *fc_status_data_start;
  * Return FC_ABORT to exit out, FC_SKIP to skip copying the data,
  * and FC_CONTINUE to keep going.
  */
-extern const char *fc_status_data_progress;
+extern const char *const fc_status_data_progress;
 
 /*
  * Data copy has finished.
@@ -127,7 +127,7 @@ extern const char *fc_status_data_progress;
  * FC_ABORT will cause the function to exit out (errno set to 0,
  * but returning -1); FC_SKIP and FC_CONTINUE both simply continue.
  */
-extern const char *fc_status_data_completion;
+extern const char *const fc_status_data_completion;
 
 /*
  * Indicates an error has occurred while preparing the copy.
@@ -137,7 +137,7 @@ extern const char *fc_status_data_completion;
  * Called as (*cb)(fc_error_preparation, context, char *which, int errno)
  * where "which" is either the src or dst file.
  */
-extern const char *fc_error_preparation;
+extern const char *const fc_error_preparation;
 
 /*
  * Called when an error has occurred while copying data.
@@ -147,7 +147,7 @@ extern const char *fc_error_preparation;
  * function to stop copying data with no error, while FC_CONTINUE
  * causes it to continue trying to copy the rest of the stages.
  */
-extern const char *fc_error_data;
+extern const char *const fc_error_data;
 
 
 /*
@@ -158,7 +158,7 @@ extern const char *fc_error_data;
  * but returning -1); FC_SKIP causes it to skip the extattr stage
  * while FC_CONTINUE lets it continue.
  */
-extern const char *fc_status_extattr_start;
+extern const char *const fc_status_extattr_start;
 
 /*
  * Called when an error occurs during an EA copy.
@@ -167,7 +167,7 @@ extern const char *fc_status_extattr_start;
  * FC_SKIP causes ihe function to stop copying EAs;
  * FC_CONTINUE continues to the next EA (if any).
  */
-extern const char *fc_error_extattr;
+extern const char *const fc_error_extattr;
 
 /*
  * Called when copying an extended attribute, before
@@ -177,7 +177,7 @@ extern const char *fc_error_extattr;
  * to 0, but returning -1), FC_SKIP will ignore this EA, and FC_CONTNUE
  * will attempt to do the copy.
  */
-extern const char *fc_status_extattr;
+extern const char *const fc_status_extattr;
 
 /*
  * Called when finished with an EA.  Note that this is called with
@@ -192,7 +192,7 @@ extern const char *fc_status_extattr;
  * 0, but returning -1); FC_SKIP and FC_CONTINUE behave the same way,
  * progressing to either the next EA or the next stage.
  */
-extern const char *fc_status_extattr_completion;
+extern const char *const fc_status_extattr_completion;
 
 // And now the big enchilada
 extern int filecopy(filecopy_options_t, const char *src, const char *dst);
