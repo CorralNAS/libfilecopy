@@ -18,6 +18,8 @@
 
 #include "filecopy.h"
 
+#define DEBUG_DEVEL 0	// Turn to 1 for development debugging
+
 typedef enum {
 	TYPE_UNKNOWN = 0,
 	TYPE_DIR,
@@ -33,6 +35,7 @@ struct file_state {
 	ftype_t type;
 	int flags;
 	int fd;
+	acl_t acl;
 };
 
 struct filecopy_options {
@@ -173,6 +176,11 @@ filecopy_options_release(filecopy_options_t o)
 	if (opts->error_b)
 		Block_release(opts->error_b);
 #endif /* __BLOCKS__ */
+	if (opts->src.acl)
+		acl_free(opts->src.acl);
+	if (opts->dst.acl)
+		acl_free(opts->dst.acl);
+	
 	free(opts);
 }
 
@@ -374,17 +382,22 @@ copy_acl(struct filecopy_options *opts)
 	acl_t new_acl = NULL;
 	acl_entry_t ace;
 	int ace_id;
-	size_t ace_index = 1;
+	size_t ace_index = 0;
 	int acl_type = 0;
 	
 	/*
 	 * Need to get the ACL from the source _and_ destination.
 	 */
-	src_acl = get_acl(&opts->src);
-	dst_acl = get_acl(&opts->dst);
+	src_acl = opts->src.acl;
+	dst_acl = opts->dst.acl;
 	
 	if (src_acl == NULL && dst_acl == NULL)
 		goto done;
+	
+#if DEBUG_DEVEL
+	if (dst_acl)
+		warnx("dst_acl = %s", acl_to_text(dst_acl, NULL));
+#endif
 	
 	// Need to figure out what kind of ACL to use.
 #ifdef O_SYMLINK
@@ -393,7 +406,8 @@ copy_acl(struct filecopy_options *opts)
 	else
 #endif
 		acl_type = fpathconf(opts->dst.fd, _PC_ACL_NFS4) == 1 ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
-	new_acl = uberacl(acl_type);
+	new_acl = acl_init(1);
+
 	if (new_acl == NULL) {
 		retval = FC_ABORT;
 		goto done;
@@ -411,19 +425,34 @@ copy_acl(struct filecopy_options *opts)
 	 * Investigate this.
 	 */
 	if (src_acl) {
+#if DEBUG_DEVEL
+		warnx("source acl = \n%s", acl_to_text(src_acl, NULL));
+#endif
 		for (ace_id = ACL_FIRST_ENTRY;
 		     acl_get_entry(src_acl, ace_id, &ace) == 1;
 		     ace_id = ACL_NEXT_ENTRY) {
 			acl_entry_t tmp;
+			acl_tag_t tag;
 #ifdef ACL_ENTRY_INHERITED
 			acl_flagset_t flags;
-			if (acl_get_flaget_np(ace, &flags) != -1)
+			if (acl_get_flagset_np(ace, &flags) != -1)
 				if (acl_get_flag_np(flags, ACL_ENTRY_INHERITED) == 0)
 #endif
+				{
 					// Note how I'm cleverly not checking for errors
 					acl_create_entry_np(&new_acl, &tmp, ace_index++);
-			acl_copy_entry(tmp, ace);
-
+					/*
+					 * You'd think that acl_copy_entry() would do everything we want...
+					 * but it doesn't:  if we don't set the tag type, it doesn't seem
+					 * to get branded, and things simply do not work.
+					 */
+					acl_get_tag_type(ace, &tag);
+					acl_set_tag_type(tmp, tag);
+					acl_copy_entry(tmp, ace);
+#if DEBUG_DEVEL
+					warnx("ace_index = %zd:  Now tmp acl = \n%s", ace_index - 1, acl_to_text(new_acl, NULL));
+#endif
+				}
 		}
 	}
 #ifdef ACL_ENTRY_INHERITED
@@ -439,22 +468,29 @@ copy_acl(struct filecopy_options *opts)
 			acl_flagset_t flags;
 			if (acl_get_flagset_np(ace, &flags) != -1) {
 				if (acl_get_flag_np(flags, ACL_ENTRY_INHERITED) == 1) {
-					acl_create_entry(&new_acl, &ace);
-					ace_index++;
+					acl_entry_t tmp;
+					acl_tag_t tag;
+					acl_create_entry_np(&new_acl, &tmp, ace_index++);
+					warnx("Found an inherited ACE");
+					acl_get_tag_type(ace, &tag);
+					acl_set_tag_type(tmp, tag);
+					acl_copy_entry(tmp, ace);
 				}
 			}
 		}
 	}
 
 #endif
-	if (ace_index > 1) {
+	if (ace_index > 0) {
 		// There are actually some ACLs
 		int nfs4;
 		int kr;
+#if 0
 		kr = acl_delete_entry_np(new_acl, 0);
 		if (kr == -1) {
 			warn("Could not remove uberace");
 		}
+#endif
 #ifndef O_SYMLINK
 		if (opts->dst.type == TYPE_LINK)
 			nfs4 = lpathconf(opts->dst.name, _PC_ACL_NFS4);
@@ -465,7 +501,7 @@ copy_acl(struct filecopy_options *opts)
 		acl_type = 0;
 #ifndef O_SYMLINK
 		if (opts->dst.type == TYPE_LINK)
-			kr = acl_set_link_np(opts->dst.name, new_acl, acl_type);
+			kr = acl_set_link_np(opts->dst.name, acl_type, new_acl);
 		else
 #endif
 			kr = acl_set_fd_np(opts->dst.fd, new_acl, ACL_TYPE_NFS4/*acl_type*/);
@@ -475,10 +511,6 @@ copy_acl(struct filecopy_options *opts)
 		}
 	}
 done:
-	if (src_acl)
-		acl_free(src_acl);
-	if (dst_acl)
-		acl_free(dst_acl);
 	if (new_acl)
 		acl_free(new_acl);
 	
@@ -872,12 +904,12 @@ open_dest(struct filecopy_options *opts, const char *name)
 	if (tmpfd == -1) {
 		// We failed to get an open file descriptor
 		// But this is okay if it's a symlink
-		if (opts->src.type == TYPE_LINK) {
+		if (opts->src.type == TYPE_LINK && errno == EMLINK) {
 			// If we made it here, we created teh destination.
 			lstat(name, &opts->dst.sbuf);
 		} else {
 			goto fail;
-		} 
+		}
 	} else {
 		fstat(tmpfd, &opts->dst.sbuf);
 		opts->dst.fd = tmpfd;
@@ -894,7 +926,7 @@ open_dest(struct filecopy_options *opts, const char *name)
 		goto fail;
 	}
 	opts->dst.name = name;
-	
+	opts->dst.acl = get_acl(&opts->dst);
 	return 0;
 fail:
 	// do cleanup
@@ -922,10 +954,25 @@ open_source(struct filecopy_options *opts, const char *name)
 			return -1;
 		}
 		if (opts->src.type == TYPE_LINK) {
-			o_flags |= O_NOFOLLOW;
+#ifdef O_SYMLINK
+			o_flags |= O_SYMLINK;
+#else
+			opts->src.acl = get_acl(&opts->src);
+#endif
 		}
 		opts->src.fd = open(name, o_flags);
-		return opts->src.fd == -1 ? -1 : 0;
+		if (opts->src.fd != -1) {
+			opts->src.acl = get_acl(&opts->src);
+			return 0;
+		} else {
+#ifndef O_SYMLINK
+			if (opts->src.type == TYPE_LINK && errno == EMLINK) {
+				errno = 0;
+				return 0;
+			}
+#endif
+			return -1;
+		}
 	} else {
 		return -1;
 	}
@@ -1144,6 +1191,14 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 		terror = errno;
 		goto done;
 	}
+#if DEBUG_DEVEL
+	acl_t tmp_acl;
+	tmp_acl = get_acl(&opts->dst);
+	if (tmp_acl) {
+		warnx("%s(%d):  dst_acl = %s", __FUNCTION__, __LINE__, acl_to_text(tmp_acl, NULL));
+		acl_free(tmp_acl);
+	}
+#endif
 	/*
 	 * Now we need to see if the copy is something we can do.
 	 * If we're copying data, we can only copy directory -> directory,
@@ -1169,6 +1224,13 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 		}
 	}
 	
+#if DEBUG_DEVEL
+	tmp_acl = get_acl(&opts->dst);
+	if (tmp_acl) {
+		warnx("%s(%d):  dst_acl = %s", __FUNCTION__, __LINE__, acl_to_text(tmp_acl, NULL));
+		acl_free(tmp_acl);
+	}
+#endif
 	/*
 	 * Copy EAs, if requested
 	 */
@@ -1181,14 +1243,36 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 		}
 	}
 
+#if DEBUG_DEVEL
+	tmp_acl = get_acl(&opts->dst);
+	if (tmp_acl) {
+		warnx("%s(%d):  dst_acl = %s", __FUNCTION__, __LINE__, acl_to_text(tmp_acl, NULL));
+		acl_free(tmp_acl);
+	}
+#endif
 	if (opts->posix) {
 		copy_posix(opts);
 	}
+	
+#if DEBUG_DEVEL
+	tmp_acl = get_acl(&opts->dst);
+	if (tmp_acl) {
+		warnx("%s(%d):  dst_acl = %s", __FUNCTION__, __LINE__, acl_to_text(tmp_acl, NULL));
+		acl_free(tmp_acl);
+	}
+#endif
 	
 	if (opts->acl) {
 		copy_acl(opts);
 	}
 	
+#if DEBUG_DEVEL
+	tmp_acl = get_acl(&opts->dst);
+	if (tmp_acl) {
+		warnx("%s(%d):  dst_acl = %s", __FUNCTION__, __LINE__, acl_to_text(tmp_acl, NULL));
+		acl_free(tmp_acl);
+	}
+#endif
 	if (opts->times) {
 		(void)copy_times(opts);
 	}
