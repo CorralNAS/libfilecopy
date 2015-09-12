@@ -291,38 +291,41 @@ filecopy_set_string(filecopy_options_t o, const char *opt, const char *v)
 	return EINVAL;
 }
 
-static acl_t
-uberacl(int type)
+static int
+add_uberace(acl_t *aclp)
 {
-	acl_t acl = acl_init(1);
+	int acl_type;
 	acl_permset_t perms;
 	acl_entry_t first = NULL;
 	uid_t me = geteuid();
 	
-	if (acl == NULL) {
+	if (aclp == NULL || *aclp == NULL) {
 		warn("Unable to create uberace");
-		return NULL;
+		return EINVAL;
 	}
 
-	if (acl_create_entry_np(&acl, &first, ACL_FIRST_ENTRY) == -1) {
+	if (acl_get_brand_np(*aclp, &acl_type) == -1) {
+		warn("Unable to get ACL brand");
+		return errno;
+	}
+	
+	if (acl_create_entry_np(aclp, &first, ACL_FIRST_ENTRY) == -1) {
 		warn("Unable to create magic first ACE");
-		acl_free(acl);
-		return NULL;
+		return errno;
 	}
 	if (acl_get_permset(first, &perms) == -1) {
 		warn("Unable to get permset from magic first ACE");
-		acl_free(acl);
-		return NULL;
+		return errno;
 	}
 	acl_clear_perms(perms);
 
 	// Now we need to know what type to use.
-	if (type == ACL_TYPE_ACCESS) {
+	if (acl_type == ACL_TYPE_ACCESS) {
 		// Simple POSIX ACL
 		// So we just need to use write and search
 		acl_add_perm(perms, ACL_WRITE);
 		acl_add_perm(perms, ACL_EXECUTE);	// In case it's a directory
-	} else if (type == ACL_TYPE_NFS4) {
+	} else if (acl_type == ACL_TYPE_NFS4) {
 		int kr;
 		acl_add_perm(perms, ACL_WRITE_DATA);
 		acl_add_perm(perms, ACL_ADD_FILE);
@@ -330,12 +333,10 @@ uberacl(int type)
 		acl_add_perm(perms, ACL_WRITE_ATTRIBUTES);
 		acl_add_perm(perms, ACL_WRITE_ACL);
 		acl_add_perm(perms, ACL_WRITE_NAMED_ATTRS);
-		acl_add_perm(perms, ACL_READ_ACL);
 		kr = acl_set_entry_type_np(first, ACL_ENTRY_TYPE_ALLOW);
 		if (kr == -1) {
 			warn("could not set ACL type");
-			acl_free(acl);
-			return NULL;
+			return errno;
 		}
 	}
 	if (acl_set_permset(first, perms) == -1)
@@ -347,7 +348,51 @@ uberacl(int type)
 	if (acl_set_qualifier(first, &me) == -1) {
 		warn("Could not set ACE qualifier");
 	}
-	return acl;
+	return 0;
+}
+
+/*
+ * Add an uber-ace to the given file.
+ * The uber-ace gives us all the write permissions we could
+ * ever want.
+ */
+static int
+set_uberacl(struct file_state *state)
+{
+	int acl_type;
+	acl_t acl;
+	int kr;
+	
+#ifndef O_SYMLINK
+	if (state->type == TYPE_LINK)
+		acl_type = lpathconf(state->name, _PC_ACL_NFS4) == 1 ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
+	else
+#endif
+		acl_type = fpathconf(state->fd, _PC_ACL_NFS4) == 1 ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
+
+	if (state->acl == NULL) {
+		acl = acl_init(1);
+	} else {
+		acl = acl_dup(state->acl);
+	}
+	if (acl == NULL) {
+		warn("Could not create ACL copy");
+		return errno;
+	}
+
+	kr = add_uberace(&acl);
+	if (kr == 0) {
+#ifndef O_SYMLINK
+		if (state->type == TYPE_LINK)
+			kr = acl_set_link_np(state->name, acl_type, acl);
+		else
+#endif
+			kr = acl_set_fd_np(state->fd, acl, acl_type);
+		acl_free(acl);
+	} else {
+		kr = -1;
+	}
+	return kr;
 }
 
 static acl_t
@@ -385,9 +430,6 @@ copy_acl(struct filecopy_options *opts)
 	size_t ace_index = 0;
 	int acl_type = 0;
 	
-	/*
-	 * Need to get the ACL from the source _and_ destination.
-	 */
 	src_acl = opts->src.acl;
 	dst_acl = opts->dst.acl;
 	
@@ -471,7 +513,9 @@ copy_acl(struct filecopy_options *opts)
 					acl_entry_t tmp;
 					acl_tag_t tag;
 					acl_create_entry_np(&new_acl, &tmp, ace_index++);
+#if DEBUG_DEVEL
 					warnx("Found an inherited ACE");
+#endif
 					acl_get_tag_type(ace, &tag);
 					acl_set_tag_type(tmp, tag);
 					acl_copy_entry(tmp, ace);
@@ -479,38 +523,39 @@ copy_acl(struct filecopy_options *opts)
 			}
 		}
 	}
-
+	
 #endif
-	if (ace_index > 0) {
+done:
+	if (dst_acl == NULL || ace_index == 0) {
+		/*
+		 * The file didn't have an ACL.
+		 * I truly don't know what to do here -- if it has
+		 * an ACL now, I'm not sure how I would get rid of
+		 * anything.  
+		 */
+	} if (ace_index > 0) {
 		// There are actually some ACLs
+		int acl_type;
 		int nfs4;
 		int kr;
-#if 0
-		kr = acl_delete_entry_np(new_acl, 0);
+		
+		kr = acl_get_brand_np(new_acl, &acl_type);
 		if (kr == -1) {
-			warn("Could not remove uberace");
-		}
-#endif
-#ifndef O_SYMLINK
-		if (opts->dst.type == TYPE_LINK)
-			nfs4 = lpathconf(opts->dst.name, _PC_ACL_NFS4);
-		else
-#endif
-			nfs4 = fpathconf(opts->dst.fd, _PC_ACL_NFS4);
-		acl_type = (nfs4 == 1) ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
-		acl_type = 0;
-#ifndef O_SYMLINK
-		if (opts->dst.type == TYPE_LINK)
-			kr = acl_set_link_np(opts->dst.name, acl_type, new_acl);
-		else
-#endif
-			kr = acl_set_fd_np(opts->dst.fd, new_acl, ACL_TYPE_NFS4/*acl_type*/);
-		if (kr == -1) {
-			warn("Could not set new ACL on destination");
+			warn("Could not get new ACL type, can't do much else");
 			retval = FC_ABORT;
+		} else {
+#ifndef O_SYMLINK
+			if (opts->dst.type == TYPE_LINK)
+				kr = acl_set_link_np(opts->dst.name, acl_type, new_acl);
+			else
+#endif
+				kr = acl_set_fd_np(opts->dst.fd, new_acl, ACL_TYPE_NFS4/*acl_type*/);
+			if (kr == -1) {
+				warn("Could not set new ACL on destination");
+				retval = FC_ABORT;
+			}
 		}
 	}
-done:
 	if (new_acl)
 		acl_free(new_acl);
 	
@@ -927,6 +972,7 @@ open_dest(struct filecopy_options *opts, const char *name)
 	}
 	opts->dst.name = name;
 	opts->dst.acl = get_acl(&opts->dst);
+	(void)set_uberacl(&opts->dst);
 	return 0;
 fail:
 	// do cleanup
