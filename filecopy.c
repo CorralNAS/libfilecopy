@@ -532,24 +532,58 @@ done:
 		 * I truly don't know what to do here -- if it has
 		 * an ACL now, I'm not sure how I would get rid of
 		 * anything.  
+		 *
+		 * Looks like what we have to do is get the ACL, strip it,
+		 * and then set it.
 		 */
-	} if (ace_index > 0) {
+		if (dst_acl)
+			acl_free(dst_acl);
+		opts->dst.acl = NULL;
+#ifndef O_SYMLINK
+		if (opts->dst.type == TYPE_LINK)
+			acl_type = lpathconf(opts->dst.name, _PC_ACL_NFS4) == 1 ? ACL_TYPE_NFS4 : ACL_BRAND_POSIX;
+		else
+#endif
+			acl_type = fpathconf(opts->dst.fd, _PC_ACL_NFS4) == 1 ? ACL_TYPE_NFS4 : ACL_BRAND_POSIX;
+
+#ifndef O_SYMLINK
+		if (opts->dst.type == TYPE_LINK)
+			dst_acl = acl_get_link_np(opts->dst.name, acl_type);
+		else
+#endif
+			dst_acl = acl_get_fd_np(opts->dst.fd, acl_type);
+
+		if (dst_acl) {
+			int kr;
+			acl_t tmp_acl = acl_strip_np(dst_acl, 1);	// What if it's 0?
+			if (tmp_acl) {
+#ifndef O_SYMLINK
+				if (opts->dst.type == TYPE_LINK)
+					kr = acl_set_link_np(opts->dst.name, acl_type, tmp_acl);
+				else
+#endif
+					kr = acl_set_fd_np(opts->dst.fd, tmp_acl, acl_type);
+				acl_free(tmp_acl);
+			}
+			acl_free(dst_acl);
+		}
+	} else if (ace_index > 0) {
 		// There are actually some ACLs
-		int acl_type;
 		int nfs4;
 		int kr;
 		
 		kr = acl_get_brand_np(new_acl, &acl_type);
-		if (kr == -1) {
+		if (kr == -1 || acl_type == ACL_BRAND_UNKNOWN) {
 			warn("Could not get new ACL type, can't do much else");
 			retval = FC_ABORT;
 		} else {
+			acl_type = acl_type == ACL_BRAND_NFS4 ? ACL_TYPE_NFS4 : ACL_BRAND_POSIX;
 #ifndef O_SYMLINK
 			if (opts->dst.type == TYPE_LINK)
 				kr = acl_set_link_np(opts->dst.name, acl_type, new_acl);
 			else
 #endif
-				kr = acl_set_fd_np(opts->dst.fd, new_acl, ACL_TYPE_NFS4/*acl_type*/);
+				kr = acl_set_fd_np(opts->dst.fd, new_acl, acl_type);
 			if (kr == -1) {
 				warn("Could not set new ACL on destination");
 				retval = FC_ABORT;
