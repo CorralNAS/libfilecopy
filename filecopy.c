@@ -1141,35 +1141,6 @@ copy_xattrs(struct filecopy_options *opts)
 	}
 	return retval;
 }
-#if 0
-acl_func() {
-	int nfs4;
-	int acl_type;
-	acl_t new_dst_acl;
-	nfs4 = (opts->follow ? pathconf : lpathconf)(dst, _PC_ACL_NFS4);
-	acl_type = (nfs4 == 1) ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
-	orig_dst_acl = (opts->follow ? acl_get_file : acl_get_link_np)(dst, acl_type);
-	new_dst_acl = uberacl(acl_type);
-	if (new_dst_acl) {
-		int kr;
-		int brand = 0;
-		if (acl_get_brand_np(new_dst_acl, &brand) == -1) {
-			warn("Cannot get acl brand?");
-		} else {
-			warnx("ACL brand = %d", brand);
-		}
-		char *t = acl_to_text(new_dst_acl, NULL);
-		fprintf(stderr, "acl = %s\n", t);
-		kr = (opts->follow ? acl_set_file : acl_set_link_np)(dst, acl_type, new_dst_acl);
-		if (kr == -1) {
-			char *txt = acl_to_text_np(new_dst_acl, NULL, ACL_TEXT_VERBOSE | ACL_TEXT_APPEND_ID);
-			warn("Could not create ACL %s on dst %s", txt, dst);
-			acl_free((void*)txt);
-			acl_free(new_dst_acl);
-		}
-	}
-}
-#endif
 
 /*
  * Open the destination.  This is considerably trickier than
