@@ -1,0 +1,19 @@
+libfilecopy
+
+Copying files is a deceptively complicated task -- even when copying only a
+single file-system object, copying extended attributes and ACLs mean it's not
+simply a matter of open-open-read-write-close-close.  Especially with ACLs,
+since inherited entries can complicate things immensely.
+
+filecopy() here is inspired by Darwin's copyfile() routine.  Since it's not
+compatible with it, I changed the name, but I may try to write a stub for the
+simple cases later on.  Right now, the main lack is the serialization (packing
+and unpacking).  (Note:  at no point with filecopy's serialization be compatible
+with copyfile's.  The latter uses the AppleDouble format, which is arcane and
+cannot be generated while streaming.  I'll go with a simple custom format, or
+possibly simply use tar's format and attach semantics.)
+
+treecopy() does recursive copies.  This is where the real complication in
+copying comes out, because of inherited ACLs.
+
+This is very new code, and has bugs and limitations.  They'll be worked on.
