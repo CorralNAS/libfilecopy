@@ -1,0 +1,142 @@
+.\" Copyright (c) 2015 iXsystems, Inc.
+.\" All rights reserved.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+.\" IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+.\" OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+.\" IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+.\" INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+.\" BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+.\" LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+.\" AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+.\" OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.ds str-Lb-libfilecopy        File copying library (libfilecopy, \-lfilecopy)
+.Dd September 18, 2015
+.Dt filecopy_set_callback 3
+.Os
+.Sh NAME
+.Nm filecopy_set_callback ,
+.Nm filecopy_set_block
+.Nd Set status and error callbacks and block handlers
+.Sh LIBRARY
+.Lb libfilecopy
+.Sh SYNOPSIS
+.In filecopy.h
+.Ft int
+.Fn filecopy_set_callback "filecopy_options_t options" "const char *option" "filecopy_callback_t cb"
+.Ft int
+.Fn filecopy_set_block "filecopy_options_t options" "const char *option" "filecopy_block_t block"
+.Sh DESCRIPTION
+The
+.Fn filecopy_set_callback
+function sets a status or error callback, while the
+.Fn filecopy_set_block
+function sets a status or error block handler.
+.Fn filecopy_set_block
+is only valid when blocks are enabled.
+There are four options for setting callbacks (or blocks):
+.Bl -column -offset 3n "fc_option_status_block"
+.It fc_option_status_cb	Set the status callback function.
+.It fc_option_error_cb	Set the error callback function.
+.It fc_option_status_block	Set the status block handler.
+.It fc_option_error_block	Set the error block handler.
+.El
+.Sh STATUS VALUES
+Both callbacks and blocks are expected to return a value of type
+.Ft filecopy_status_t ;
+this is an enum with the following values and general meanings:
+.Bl -column -offset 3n "FC_CONTINUE"
+.It FC_ABORT	Stop, with an error, all copying.
+.It FC_SKIP	Stop the current stage, without an error.
+.It FC_CONTINUE	Continue copying.  If an unrecoverable error has occurred, this will skip the current item or stage, and continue to the next one.
+.El
+.Pp
+Both callbacks and blocks take variable number of arguments.  Each function callback has at least two arguments:  the caller-supplied context, and the reason for the invocation; block handlers have at least the reason.  Any other arguments are described below, with the order and types necessary to retrieve them.
+.Pp
+Callbacks and blocks are organized into two groups:  status and error.
+When invoked, both callbacks and blocks are called the same way, with the
+exception that callbacks have a context parameter (if set by the caller),
+while block handlers do not.  The first (for blocks) or second (for
+callbacks) parameter indicates what status or error is being invoked;
+any subsequent arguments are context-dependent, and described with the
+invocation reason below.
+.Pp
+The status group contains the following invocation reasons:
+.Bl -column -offset 3n "fc_status_extattr_completion"
+.It fc_status_data_start	Indicates a data copy is about to start.
+No additional arguments.
+.It fc_status_data_progress	Called periodically during data copying. Two aditional arguments, of
+.Ft off_t
+type; the first is the expected amount of data (in bytes) to copy, the second is the amount copied so far.
+.It fc_status_data_completion	Data copying has completed.  One additional argument, of type
+.Ft off_t ,
+indicating how much data was copied.
+.It fc_status_extattr_start	The extended attribute copying phase has begun.
+.It fc_status_extattr	Status on copying an extended attribute.  Since extended attributes must be set in one system call, this only indicates that the named extended attribute is about to be copied.  Three additional arguments, all of type
+.Ft "char *" :
+.Dv srcname (the
+name of the file being copied),
+.Dv namespace (the
+namespace for the extended attribute), and
+.Dv attrname (the
+name of the extended attribute being copied).
+.It fc_status_extattr_completion	Called when finished copying an extended attributes, and when finished copying all extended attributes.  In the first context, it has four additional arguments,
+.Ft "char *"
+.Dv srcname ,
+.Ft "char *"
+.Dv namespace ,
+.Ft "char *"
+.Dv eaname ,
+.Ft off_t
+.Dv nbytes ;
+this indicates the source file, namespace, attribute name, and bytes copied.  In the second context, it has two additional arguments,
+.Ft "char *"
+.Dv srcname ,
+and a
+.Dv NULL
+argument after that.  This indicates that all extended attributes have finished copying.
+.El
+.Pp
+The error reasons are:
+.Bl -column -offset 3n "fc_error_perparation"
+.It fc_error_preparation	An error occurred during preparation, due to, e.g., being unable to allocate memory, open a file, or some other.  The first additional argument is a
+.Ft "char *"
+indicating the source or destination file; the second additional argument is a
+.Ft int
+.Dv errno .
+.It fc_error_data	An error occurred while copying data.  The first additional argument is
+.Ft off_t ,
+indicating the amount of data (if any) copied so far; the second additional argument is an
+.Ft int
+indicating the
+.Dv errno
+value.
+.It fc_error_extattr	An error occurred while copying an extended attribute.  The four additional arguments are:
+.Ft "char *"
+.Dv srcname (the
+name of the source file being copied),
+.Ft "char *"
+.Dv namespace (the
+namespace for the extended attribute),
+.Ft "char *"
+.Dv attrname (the
+name of the attribute being copied when the error occurred), and
+.Ft int
+.Dv errnor (the
+error number).
+.El
+.Pp
+.Sh BUGS
+Probably too many to list.

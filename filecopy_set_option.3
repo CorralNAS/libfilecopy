@@ -1,0 +1,131 @@
+.\" Copyright (c) 2015 iXsystems, Inc.
+.\" All rights reserved.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+.\" IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+.\" OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+.\" IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+.\" INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+.\" BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+.\" LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+.\" AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+.\" OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.ds str-Lb-libfilecopy        File copying library (libfilecopy, \-lfilecopy)
+.Dd September 18, 2015
+.Dt filecopy_set_option 3
+.Os
+.Sh NAME
+.Nm filecopy_set_option ,
+.Nm filecopy_get_option ,
+.Nm filecopy_options_init ,
+.Nm filecopy_options_release
+.Nd Manipulate options for copying files
+.Sh LIBRARY
+.Lb libfilecopy
+.Sh SYNOPSIS
+.In filecopy.h
+.Ft filecopy_options_t
+.Fn filecopy_options_init void
+.Ft void
+.Fn filecopy_options_release "filecopy_options_t options"
+.Ft int
+.Fn filecopy_set_option "filecopy_options_t options" "const char *optname" "..."
+.Ft int
+.Fn filecopy_set_bool "filecopy_options_t options" "const char *opt" "int value"
+.Ft int
+.Fn filecopy_set_int "filecopy_options_t options" "const char *opt" "int value"
+.Ft int
+.Fn filecopy_set_string "filecopy_options_t options" "const char *opt" "const char *value"
+.Ft int
+.Fn filecopy_set_callback "filecopy_options_t options" "const char *opt" "filecopy_callback_t cb"
+.Ft int
+.Fn filecopy_set_block "filecopy_options_t options" "const char *opt" "filecopy_block_t b"
+.Ft int
+.Fn filecopy_set_option "filecopy_options_t options" "const char *opt" "..."
+.Sh DESCRIPTION
+The
+.Fn filecopy_options_init
+function allocates a
+.Dv filecopy_options_t
+opaque object, initializing it with default values, and returns it.
+It must be released with the
+.Fn filecopy_options_release
+function.
+.Pp
+Options are set with the
+.Fn filecopy_set_option ,
+.Fn filecopy_set_bool ,
+.Fn filecopy_set_int ,
+.Fn filecopy_set_string ,
+.Fn filecopy_set_callback ,
+and
+.Fn filecopy_set_block
+functions.  The types of the options are explicitly stated for all but the
+.Fn filecopy_set_option
+function, but that assumes the types for the options are as described below.
+.Pp
+Options are given as strings, but the programmer should not depend on the values of the
+strings and instead only use the external variables, as options are decoded based
+on the variable, not the contents.
+.Pp
+Options are grouped into types below.
+.Pp
+The first set of options are boolean, 1 for true and 0 for false.
+.Bl -column -offset 3n "fc_option_exclusive"
+.It fc_otion_data	Copy data (defaults to true).  This is only applicable to file copies, although attempting to copy data with unlike types (e.g., file to directory) will result in an error.
+.It fc_option_xattr	Copy extended attributes (defaults to true).
+.It fc_option_acl	Copy ACLs (defaults to true).
+.It fc_option_perms	Copy POSIX permissions (defaults to true).
+.It fc_otpion_times	Copy POSIX times, as much as possible (defaults to true).
+.It fc_option_follow	Follow symlinks (defaults to true).  False means symbolic links, not what they point to, are copied.
+.It fc_option_exclusive	If true, fail if the target already exists (defaults to false).
+.El
+.Pp
+The next option can only be set with
+.Fn filecopy_option_set .
+.Bl -column -offset 3n "fc_option_context"
+.It fc_option_context	Sets the context for callbacks; type is
+.Ft "void *"
+and is otherwise opaque to the
+.Nm filecopy
+library.
+.El
+.Pp
+The following options set callbacks and blocks.  Further discussion
+is in the
+.Xr filecopy_callbacks 3
+manual page.
+.Bl -column -offset 3n "fc_option_status_block"
+.It fc_option_status_cb	Sets a function-pointer callback for status information.
+.It fc_option_error_cb	Sets a function-pointer callback for error information.
+.It fc_option_status_block	Sets a block handler for status information.  Only valid for compilers with blocks enabled.
+.It fc_option_error_block	Sets a block handler for error information.  Only valid for compilers with blocks enabled.
+.El
+.Pp
+Only one of the block or function callback may be set at a time; that is, setting
+.Dv fc_option_status_cb
+will clear
+.Dv fc_option_status_block ,
+and vice-versa.
+.Sh RETURN VALUES
+The functions will return 0 on success, and an
+.Dv errno
+value (such as
+.Dv EINVAL )
+on error.
+.Sh SEE ALSO
+.Xr filecopy 3 ,
+.Xr filecopy_callbacks 3
+

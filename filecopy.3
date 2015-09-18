@@ -1,0 +1,124 @@
+.\" Copyright (c) 2015 iXsystems, Inc.
+.\" All rights reserved.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+.\" IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+.\" OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+.\" IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+.\" INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+.\" BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+.\" LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+.\" AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+.\" OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.ds str-Lb-libfilecopy        File copying library (libfilecopy, \-lfilecopy)
+.Dd September 18, 2015
+.Dt filecopy 3
+.Os
+.Sh Name
+.Nm filecopy , treecopy
+.Nd file and hierarchy copying functions
+.Sh LIBRARY
+.Lb libfilecopy
+.Sh SYNOPSIS
+.In filecopy.h
+.Ft int
+.Fn filecopy "filecopy_options_t options" "const char *src" "const char *dst"
+.Ft int
+.Fn treecopy "filecopy_options_t options" "const char *src" "const char *dst"
+.Sh DESCRIPTION
+The
+.Fn filecopy
+and
+.Fn treecopy
+functions permit the copying of files, directories, symlinks, and hierarchies,
+including metadata.  (Metadata including
+.Xr acl 3 s,
+.Xr extattr 2 s,
+and POSIX permissiosn and times (such as returned by
+.Xr 2 stat ).
+.Pp
+The
+.Fn filecopy
+function copies a single object; it may be used to copy metadata
+from one filesystem object to another (for example, copy extended
+attributes from a directory to a symbolic link).  It may also be used to copy
+the object including data (e.g., copying a directory and its metadata,
+or a file and its data and metadata).
+.Pp
+The
+.Fn treecopy
+function copies hierarchies from one location to another.
+.Pp
+Both functions require a
+.Dv filecopy_options_t
+options object to be passed in; this object controls the behaviour.
+Further discussion of the options is in the
+.Xr filecopy_set_option 3
+manual page.
+.Pp
+The
+.Fn filecopy
+function also offers status and error reporting via both function
+callbacks and blocks.  Further discussion of the callbacks is in the
+.Xr filecopy_callbacks 3
+manual page.
+.Pp
+For the
+.Fn filecopy
+function, the
+.Dv dst
+parameter will be used as the actual name of the object.  That is,
+.Bd -literal -offset indent
+filecopy(options, "/tmp/fred", "/tmp/barney")
+.Ed
+.Pp
+will copy the file
+.Dq /tmp/fred
+to
+.Dq /tmp/barney .
+If data copying is requested, and the two filesystem objects are not
+the same type (e.g., one is a directory and the other is a file),
+an error will occur.
+If the destination object does not exist,
+.Nm filecopy
+will attempt to create it, as the same type as the source.
+.Pp
+Currently,
+.Nm treecopy
+will create inside the destination space.  That is,
+.Bd -literal -offset indent
+treecopy(options, "/tmp/fred", "/tmp/barney")
+.Ed
+.Pp
+will require that
+.Dq /tmp/barney
+be a directory, and will attempt to create
+.Dq /tmp/barney/fred
+as part of the copying process.
+.Sh SEE ALSO
+.Xr acl 3 ,
+.Xr stat 2 ,
+.Xr extattr 2 ,
+.Xr filecopy_options_init 3 ,
+.Xr filecopy_set_option 3 ,
+.Xr filecopy_callbacks 3
+.Sh BUGS
+Too many to list at the moment.  The API should be considered unstable at
+the moment.  Testing has been sporadic, and needs to improve.
+.Sh HISTORY
+These functions were created by iXsystems for convenience and consistency in copying.
+They are heavily modeled, but not compatible with, the Darwin
+.Nm copyfile
+function.
