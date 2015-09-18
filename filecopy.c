@@ -20,6 +20,8 @@
 
 #define DEBUG_DEVEL 0	// Turn to 1 for development debugging
 
+#define FLAG_CREATED	0x00001
+
 typedef enum {
 	TYPE_UNKNOWN = 0,
 	TYPE_DIR,
@@ -27,7 +29,11 @@ typedef enum {
 	TYPE_LINK,
 } ftype_t;
 
-#define FLAG_CREATED	0x00001
+struct xattr_ns {
+	int ns_id;
+	const char *ns_name;
+	int perm_req;
+};
 
 struct file_state {
 	const char *name;
@@ -82,7 +88,14 @@ static struct filecopy_options options_default = {
 		.type = TYPE_UNKNOWN,
 	},
 };
-	
+
+static struct xattr_ns
+namespaces[] = {
+	{ EXTATTR_NAMESPACE_SYSTEM, EXTATTR_NAMESPACE_SYSTEM_STRING, 1 },
+	{ EXTATTR_NAMESPACE_USER, EXTATTR_NAMESPACE_USER_STRING, 0 },
+	{ 0 },
+};
+
 //#define DECL(name) const char *name __attribute__((section(".rodata"))) = #name
 #define DECL(name) const char *const name = #name
 DECL(fc_option_data);
@@ -90,7 +103,6 @@ DECL(fc_option_xattr);
 DECL(fc_option_acl);
 DECL(fc_option_perms);
 DECL(fc_option_times);
-DECL(fc_option_recursion);
 DECL(fc_option_follow);
 DECL(fc_option_remove);
 DECL(fc_option_exclusive);
@@ -131,7 +143,6 @@ filecopy_set_option(filecopy_options_t o, const char *opt, ...)
 		    optname == fc_option_acl ||
 		    optname == fc_option_perms ||
 		    optname == fc_option_times ||
-		    optname == fc_option_recursion ||
 		    optname == fc_option_follow ||
 		    optname == fc_option_exclusive) {
 			rv = filecopy_set_bool(opts, optname, va_arg(ap, int));
@@ -244,8 +255,6 @@ filecopy_set_bool(filecopy_options_t o, const char *opt, int v)
 		opts->posix = v;
 	} else if (fc_option_times == opt) {
 		opts->times = v;
-	} else if (fc_option_recursion == opt) {
-		opts->recursion = v;
 	} else if (fc_option_follow == opt) {
 		opts->follow = v;
 	} else if (fc_option_remove == opt) {
@@ -271,8 +280,6 @@ filecopy_get_bool(filecopy_options_t o, const char *opt)
 		return opts->posix;
 	} else if (fc_option_times == opt) {
 		return opts->times;
-	} else if (fc_option_recursion == opt) {
-		return opts->recursion;
 	} else if (fc_option_follow == opt) {
 		return opts->follow;
 	} else if (fc_option_remove == opt) {
@@ -289,6 +296,108 @@ int
 filecopy_set_string(filecopy_options_t o, const char *opt, const char *v)
 {
 	return EINVAL;
+}
+/*
+ * Return the type of ACL -- ACL_TYPE_ACCESS or ACL_TYPE_NFS4 --
+ * for the given file.  This assumes the file exists.
+ */
+static int
+get_acl_type(struct file_state *state)
+{
+	int acl_type;
+#ifndef O_SYMLINK
+	if (state->type == TYPE_LINK)
+		acl_type = lpathconf(state->name, _PC_ACL_NFS4) == 1 ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
+	else
+#endif
+		acl_type = fpathconf(state->fd, _PC_ACL_NFS4) == 1 ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
+	return acl_type;
+}
+
+/*
+ * Determine if the ACL has an uberace.
+ * This will by definition be the first ACE.
+ * We need to know the branding; if there's no branding
+ * then we return 0.
+ * If we decide it does have the uberace, then
+ * we return 1.
+ */
+static int
+has_uberace(acl_t acl)
+{
+	int retval = 0;
+	int acl_type;
+	acl_permset_t perms;
+	acl_entry_t first = NULL;
+	uid_t me = geteuid();
+	uid_t *q;
+	acl_tag_t tag;
+	
+	if (acl) {
+		if (acl_get_brand_np(acl, &acl_type) == -1)
+			goto done;
+		
+		switch (acl_type) {
+		case ACL_BRAND_POSIX:	acl_type = ACL_TYPE_ACCESS; break;
+		case ACL_BRAND_NFS4:	acl_type = ACL_TYPE_NFS4; break;
+		default:	goto done;
+		}
+
+		if (acl_get_entry(acl, ACL_FIRST_ENTRY, &first) == -1) {
+			// Can't get the first ACE, so bail out
+			goto done;
+		}
+
+		if (acl_get_tag_type(first, &tag) == -1) {
+			goto done;
+		}
+		
+		if (tag != ACL_USER) {
+			// Not the uberace we constructed!
+			goto done;
+		}
+		
+		if ((q = acl_get_qualifier(first)) == NULL) {
+			goto done;
+		}
+		if (*q != me) {
+			goto done;
+		}
+		
+		// All that's left is comparing the permision set
+		if (acl_get_permset(first, &perms) == -1) {
+			// Another chance to bail
+			goto done;
+		}
+		if (acl_type == ACL_TYPE_ACCESS) {
+			if (acl_get_perm_np(perms, ACL_WRITE) != 1 ||
+			    acl_get_perm_np(perms, ACL_EXECUTE) != 1 ||
+			    acl_get_perm_np(perms, ACL_READ) != 0)
+				goto done;
+			retval = 1;
+		} else if (acl_type == ACL_TYPE_NFS4) {
+			acl_entry_type_t type;
+
+			if (acl_get_entry_type_np(first, &type) == -1) {
+				goto done;
+			}
+			if (type != ACL_ENTRY_TYPE_ALLOW) {
+				goto done;
+			}
+			if (acl_get_perm_np(perms, ACL_WRITE_DATA) != 1 ||
+			    acl_get_perm_np(perms, ACL_ADD_FILE) != 1 ||
+			    acl_get_perm_np(perms, ACL_APPEND_DATA) != 1 ||
+			    acl_get_perm_np(perms, ACL_WRITE_ATTRIBUTES) != 1 ||
+			    acl_get_perm_np(perms, ACL_WRITE_ACL) != 1 ||
+			    acl_get_perm_np(perms, ACL_WRITE_NAMED_ATTRS) != 1)
+				goto done;
+			retval = 1;
+		} else {
+			abort();
+		}
+	}
+done:
+	return retval;
 }
 
 static int
@@ -309,6 +418,14 @@ add_uberace(acl_t *aclp)
 		return errno;
 	}
 	
+	switch (acl_type) {
+	case ACL_BRAND_POSIX:	acl_type = ACL_TYPE_ACCESS; break;
+	case ACL_BRAND_NFS4:	acl_type = ACL_TYPE_NFS4; break;
+	default:
+		errno = EINVAL;
+		return errno;
+	}
+			
 	if (acl_create_entry_np(aclp, &first, ACL_FIRST_ENTRY) == -1) {
 		warn("Unable to create magic first ACE");
 		return errno;
@@ -363,12 +480,7 @@ set_uberacl(struct file_state *state)
 	acl_t acl;
 	int kr;
 	
-#ifndef O_SYMLINK
-	if (state->type == TYPE_LINK)
-		acl_type = lpathconf(state->name, _PC_ACL_NFS4) == 1 ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
-	else
-#endif
-		acl_type = fpathconf(state->fd, _PC_ACL_NFS4) == 1 ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
+	acl_type = get_acl_type(state);
 
 	if (state->acl == NULL) {
 		acl = acl_init(1);
@@ -402,20 +514,69 @@ get_acl(struct file_state *state)
 	int acl_type;
 	acl_t retval = NULL;
 	
-#ifndef O_SYMLINK
-	if (state->type == TYPE_LINK)
-		nfs4 = lpathconf(state->name, _PC_ACL_NFS4);
-	else
-#endif
-		nfs4 = fpathconf(state->fd, _PC_ACL_NFS4);
+	acl_type = get_acl_type(state);
 
-	acl_type = (nfs4 == 1) ? ACL_TYPE_NFS4 : ACL_TYPE_ACCESS;
 #ifndef O_SYMLINK
 	if (state->type == TYPE_LINK)
 		retval = acl_get_link_np(state->name, acl_type);
 	else
 #endif
 		retval = acl_get_fd_np(state->fd, acl_type);
+	return retval;
+}
+
+
+/*
+ * Attempt to reove the uberace from the given file.
+ * If the file doesn't have an ACL, we don't care;
+ * if the first ACE isn't the uberace, we don't care.
+ */
+static filecopy_status_t
+remove_uberace(struct file_state *state)
+{
+	acl_t file_acl = NULL;
+	int acl_type = get_acl_type(state);
+	filecopy_status_t retval = FC_ABORT;
+	int kr;
+	
+#ifndef O_SYMLINK
+	if (state->type == TYPE_LINK)
+		file_acl = acl_get_link_np(state->name, acl_type);
+	else
+#endif
+		file_acl = acl_get_fd_np(state->fd, acl_type);
+
+	if (file_acl == NULL) {
+		// No acl!
+		retval =  FC_CONTINUE;
+		goto done;
+	}
+	if (has_uberace(file_acl) == 0) {
+		// No uberace!
+		retval = FC_CONTINUE;
+		goto done;
+	}
+	// At this point, we know that file_acl has an uberace as
+	// the first entry.  So we simply delete it.
+	if (acl_delete_entry_np(file_acl, ACL_FIRST_ENTRY) == -1) {
+		warn("Could not delete uberace from ACL");
+		goto done;
+	}
+#ifndef O_SYMLINK
+	if (state->type == TYPE_LINK)
+		kr = acl_set_link_np(state->name, acl_type, file_acl);
+	else
+#endif
+		kr = acl_set_fd_np(state->fd, file_acl, acl_type);
+	if (kr == -1) {
+		warn("Could not apply de-uberaced ACL to file");
+		retval = FC_ABORT;
+	}
+	retval = FC_CONTINUE;
+done:
+	if (file_acl)
+		acl_free(file_acl);
+	
 	return retval;
 }
 
@@ -526,6 +687,11 @@ copy_acl(struct filecopy_options *opts)
 	
 #endif
 done:
+	/*
+	 * This section does two things:
+	 * It removes the ACL from the destination if there is nothing to
+	 * apply, otherwise, it applies the ACL.
+	 */
 	if (dst_acl == NULL || ace_index == 0) {
 		/*
 		 * The file didn't have an ACL.
@@ -604,14 +770,19 @@ create_dst(const char *file)
 
 #ifdef __BLOCKS__
 static filecopy_status_t
-iterate_xattrs(int fd,
+iterate_xattrs(struct file_state *state,
 	       int ns,
 	       filecopy_status_t (^handler)(const char *eaname))
 {
 	ssize_t kr;
 	filecopy_status_t retval = FC_CONTINUE;
 	
-	kr = extattr_list_fd(fd, ns, NULL, 0);
+#ifndef O_SYMLINK
+	if (state->type == TYPE_LINK)
+		kr = extattr_list_link(state->name, ns, NULL, 0);
+	else
+#endif
+		kr = extattr_list_fd(state->fd, ns, NULL, 0);
 	if (kr == -1) {
 		return FC_ABORT;
 	}
@@ -627,7 +798,12 @@ iterate_xattrs(int fd,
 		if (buffer == NULL)
 			return FC_ABORT;
 		
-		kr = extattr_list_fd(fd, ns, buffer, bufsize);
+#ifndef O_SYMLINK
+		if (state->type == TYPE_LINK)
+			kr = extattr_list_link(state->name, ns, buffer, bufsize);
+		else
+#endif
+			kr = extattr_list_fd(state->fd, ns, buffer, bufsize);
 		if (kr == -1) {
 			free(buffer);
 			return FC_ABORT;
@@ -650,6 +826,171 @@ iterate_xattrs(int fd,
 # error "Need blocks to work"
 // Seriously, doing that with function pointers is obnoxious
 #endif
+
+/*
+ * Helper functions for xattr copying.
+ * If an error occurs, the error handler is called.
+ *
+ * Notification of start and completion of
+ * EA copying is handled outside these functions.
+ */
+
+/*
+ * Get the named attribute from opts->src.
+ * Calls the error handler when needed.
+ * Return values:
+ * FC_CONTINUE	- everything is good.
+ * FC_SKIP	- Skip this EA, but no error.
+ * FC_ABORT	- Stop copying, return an error.
+ *
+ * The caller is required to free() the allocated space.
+ */
+
+/*
+ * Eror-handling for get_xattr:  if the error is EPERM,
+ * the user is not root [fixme?], and the namespace is
+ * allowed to return EPERM in those cases.  In that case
+ * alone, the error handler is not invoked.
+ */
+static filecopy_status_t
+get_xattr(struct filecopy_options *opts,
+	  struct xattr_ns *namespace,
+	  const char *attrname,
+	  void **buffer,
+	  size_t *length)
+{
+	void *ptr;
+	ssize_t kr;
+
+	/*
+	 * We call the error handler, and not our caller.  This
+	 * simplifies the caller's code a lot.
+	 * We use a block because it's like a nested function.
+	 */
+	filecopy_status_t (^ehandler)(void) = ^(void) {
+		filecopy_status_t tstatus = FC_ABORT;
+		
+		if (opts->errorcb)
+			tstatus = (opts->errorcb)(fc_error_extattr,
+						  opts->context,
+						  namespace->ns_name,
+						  attrname,
+						  errno);
+		else if (opts->error_b)
+			tstatus = (opts->error_b)(fc_error_extattr,
+						  namespace->ns_name,
+						  attrname,
+						  errno);
+		switch (tstatus) {
+		case FC_CONTINUE:
+		case FC_SKIP:
+			errno = 0;
+		case FC_ABORT:
+			break;
+		default:
+			errno = EINVAL;
+			tstatus = FC_ABORT;
+			break;
+		}
+		return tstatus;
+	};
+	if (buffer == NULL || length == NULL) {
+		errno = EFAULT;
+		return FC_ABORT;
+	}
+
+	/*
+	 * First try to get the size of the buffer.
+	 */
+#ifndef O_SYMLINK
+	if (opts->src.type == TYPE_LINK)
+		kr = extattr_get_link(opts->src.name, namespace->ns_id, attrname, NULL, 0);
+	else
+#endif
+		kr = extattr_get_fd(opts->src.fd, namespace->ns_id, attrname, NULL, 0);
+	if (kr == -1) {
+		// We only need to check for this here.
+		if (errno == EPERM &&
+		    namespace->perm_req &&
+		    geteuid() == 0) {
+			return FC_ABORT;
+		}
+		return (ehandler)();
+	}
+
+	ptr = malloc(kr);
+	if (ptr == NULL) {
+		return (ehandler)();
+	}
+	*length = kr;
+	
+#ifndef O_SYMLINK
+	if (opts->src.type == TYPE_LINK)
+		kr = extattr_get_link(opts->src.name, namespace->ns_id, attrname, ptr, *length);
+	else
+#endif
+		kr = extattr_get_fd(opts->src.fd, namespace->ns_id, attrname, ptr, *length);
+	if (kr == -1) {
+		free(ptr);
+		return (ehandler)();
+	}
+	*buffer = ptr;
+	return FC_CONTINUE;
+}
+
+static filecopy_status_t
+set_xattr(struct filecopy_options *opts,
+	  struct xattr_ns *namespace,
+	  const char *attrname,
+	  void *buffer,
+	  size_t length)
+{
+	ssize_t kr;
+	/*
+	 * We call the error handler, and not our caller.  This
+	 * simplifies the caller's code a lot.
+	 * We use a block because it's like a nested function.
+	 */
+	filecopy_status_t (^ehandler)(void) = ^(void) {
+		filecopy_status_t tstatus = FC_ABORT;
+		
+		if (opts->errorcb)
+			tstatus = (opts->errorcb)(fc_error_extattr,
+						  opts->context,
+						  namespace->ns_name,
+						  attrname,
+						  errno);
+		else if (opts->error_b)
+			tstatus = (opts->error_b)(fc_error_extattr,
+						  namespace->ns_name,
+						  attrname,
+						  errno);
+		switch (tstatus) {
+		case FC_CONTINUE:
+		case FC_SKIP:
+			errno = 0;
+		case FC_ABORT:
+			break;
+		default:
+			errno = EINVAL;
+			tstatus = FC_ABORT;
+			break;
+		}
+		return tstatus;
+	};
+
+#ifndef O_SYMLINK
+	if (opts->dst.type == TYPE_LINK)
+		kr = extattr_set_link(opts->dst.name, namespace->ns_id, attrname, buffer, length);
+	else
+#endif
+		kr = extattr_set_fd(opts->dst.fd, namespace->ns_id, attrname, buffer, length);
+
+	if (kr == -1)
+		return (ehandler)();
+	return FC_CONTINUE;
+}
+
 /*
  * Implement the EA copying.
  * This first attempts to remove all the EAs on the destination.
@@ -675,15 +1016,7 @@ copy_xattrs(struct filecopy_options *opts)
 	filecopy_status_t retval = FC_CONTINUE;
 	char *buffer = NULL;
 	size_t bufsize;
-	struct ea_ns {
-		int ns_id;
-		const char *ns_name;
-		int perm_req;
-	} namespaces[] = {
-		{ EXTATTR_NAMESPACE_SYSTEM, EXTATTR_NAMESPACE_SYSTEM_STRING, 1 },
-		{ EXTATTR_NAMESPACE_USER, EXTATTR_NAMESPACE_USER_STRING, 0 },
-		{ 0 },
-	}, *ptr;
+	struct xattr_ns *ptr;
 	
 	if (opts->statuscb) {
 		cb_status = (opts->statuscb)(fc_status_extattr_start,
@@ -710,10 +1043,21 @@ copy_xattrs(struct filecopy_options *opts)
 	for (ptr = namespaces; ptr->ns_name; ptr++) {
 		int kr;
 		
-		(void)iterate_xattrs(dst_fd,
+		(void)iterate_xattrs(&opts->dst,
 				     ptr->ns_id,
 				     ^(const char *eaname) {
-					     int status = extattr_delete_fd(dst_fd, ptr->ns_id, eaname);
+					     int status;
+
+#ifndef O_SYMLINK
+					     if (opts->dst.type == TYPE_LINK)
+						     status = extattr_delete_link(opts->dst.name,
+										  ptr->ns_id,
+										  eaname);
+					     else
+#endif
+						     status = extattr_delete_fd(opts->dst.fd,
+										ptr->ns_id,
+										eaname);
 					     if (status == -1) {
 						     warn("Could not delete EA %s:%s from %s", ptr->ns_name, eaname, opts->dst.name);
 						     return FC_ABORT;
@@ -723,10 +1067,10 @@ copy_xattrs(struct filecopy_options *opts)
 	}
 	// Now we copy from src to dst!  Easy as pie!
 	for (ptr = namespaces; ptr->ns_name; ptr++) {
-		retval = iterate_xattrs(src_fd, ptr->ns_id, ^(const char *eaname) {
-				ssize_t bufsize;
+		retval = iterate_xattrs(&opts->src, ptr->ns_id, ^(const char *eaname) {
 				filecopy_status_t fstatus = FC_CONTINUE;
-				
+				size_t bufsize;
+				void *buffer = NULL;
 				if (opts->statuscb) {
 					fstatus = (opts->statuscb)(fc_status_extattr,
 								    opts->context,
@@ -752,85 +1096,15 @@ copy_xattrs(struct filecopy_options *opts)
 					break;
 				}
 				
-				bufsize = extattr_get_fd(src_fd, ptr->ns_id, eaname, NULL, 0);
-#define CHECK_ERROR(cb, b) {						\
-					filecopy_status_t estatus;	\
-					if (cb) { \
-						estatus = (cb)(fc_error_extattr, \
-							       opts->context, \
-							       ptr->ns_name, \
-							       ptr->ns_name, \
-							       eaname,	\
-							       errno);	\
-					} else if (b) {			\
-						estatus = (b)(fc_error_extattr, \
-							      opts->src.name, \
-							      ptr->ns_name, \
-							      eaname,	\
-							      errno);	\
-					} else				\
-						estatus = FC_ABORT;	\
-					switch (estatus) {		\
-					default:			\
-					case FC_ABORT:			\
-					case FC_SKIP:			\
-						return estatus;		\
-					case FC_CONTINUE:		\
-						break;			\
-					}				\
-				}
-				if (bufsize == -1) {
-					CHECK_ERROR(opts->errorcb, opts->error_b);
-				} else if (bufsize > 0) {
-					char *buffer = malloc(bufsize);
-					if (buffer == NULL) {
-						return FC_ABORT;
-					} else {
-						int status;
-
-						status  = extattr_get_fd(src_fd, ptr->ns_id, eaname, buffer, bufsize);
-						if (status == -1) {
-							CHECK_ERROR(opts->errorcb, opts->error_b);
-						} else {
-							status = extattr_set_fd(dst_fd, ptr->ns_id, eaname, buffer, bufsize);
-
-							if (status == -1) {
-								CHECK_ERROR(opts->errorcb, opts->error_b);
-								fstatus = FC_ABORT;
-							} else {
-								filecopy_status_t status = FC_CONTINUE;
-								if (opts->statuscb)
-									status = (opts->statuscb)(fc_status_extattr_completion,
-												  opts->context,
-												  eaname);
-								else if (opts->status_b)
-									status = (opts->status_b)(fc_status_extattr_completion,
-												  eaname);
-								switch (status) {
-								case FC_ABORT:
-									errno = 0;
-									fstatus = status;
-									break;
-								case FC_SKIP:
-								case FC_CONTINUE:
-									errno = 0;
-									fstatus = status;
-									break;
-								default:
-									errno = EINVAL;
-									fstatus = FC_ABORT;
-									break;
-								}
-							}
-						}
-						free(buffer);
-					}
+				fstatus = get_xattr(opts, ptr, eaname, &buffer, &bufsize);
+				if (fstatus != FC_CONTINUE) {
+					// get_exattr has already called the error handler
 					return fstatus;
 				}
-			done:
+				fstatus = set_xattr(opts, ptr, eaname, buffer, bufsize);
+				free(buffer);
 				return fstatus;
 			});
-#undef CHECK_ERROR
 		
 		if (retval == FC_ABORT) {
 			if (errno == EPERM && ptr->perm_req) {
@@ -1254,6 +1528,11 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 		return -1;
 	}
 
+	/*
+	 * We do this here so we can bail out early if there
+	 * is a memory allocation problem.  This makes the code
+	 * more annoying, but it saves quite a bit.
+	 */
 	if (opts->data) {
 		opts->buffer = malloc(kBufferSize);
 		if (opts->buffer == NULL) {
@@ -1345,6 +1624,9 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 	if (opts->acl) {
 		copy_acl(opts);
 	}
+	// Recursive copies will remove the uberace themselves later
+	if (!opts->recursion)
+		remove_uberace(&opts->dst);
 	
 #if DEBUG_DEVEL
 	tmp_acl = get_acl(&opts->dst);

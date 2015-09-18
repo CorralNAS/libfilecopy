@@ -61,7 +61,6 @@ extern const char *const fc_option_xattr;	// Whether or not to copy EAs. (defaul
 extern const char *const fc_option_acl;	// Whether or not to copy ACLs. (default true)
 extern const char *const fc_option_perms;	// Whether or not to copy file mode/owner/group (default true)
 extern const char *const fc_option_times;	// Whether or not to copy files (as much as possible) (default true)
-extern const char *const fc_option_recursion;	// Whether or not to recursively copy. (default false)
 extern const char *const fc_option_follow;	// Whether or not to copy symlinks, or what they point to. (default true)
 extern const char *const fc_option_exclusive;	// If true, fail if the target already exists (default false)
 
