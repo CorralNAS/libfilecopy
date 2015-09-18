@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <err.h>
+#include <unistd.h>
 
 #include "filecopy.h"
 
@@ -10,11 +11,26 @@ main(int ac, char **av)
 {
 	filecopy_options_t opts;
 	char *src, *dst;
+	int recursive = 0;
+	int opt;
+	char *progname = av[0];
 	
-	if (ac != 3) {
-		errx(1, "usage: %s <src> <dst>", av[0]);
+	while ((opt = getopt(ac, av, "R")) != -1) {
+		switch (opt) {
+		case 'R':
+			recursive = 1;
+			break;
+		default:
+			errx(1, "Unknown options `%c'", opt);
+		}
 	}
-	src = av[1]; dst = av[2];
+	ac -= optind;
+	av += optind;
+	
+	if (ac != 2) {
+		errx(1, "usage: %s [-R] <src> <dst>", progname);
+	}
+	src = av[0]; dst = av[1];
 	opts = filecopy_options_init();
 	filecopy_set_block(opts, fc_option_status_block, ^(const char *k, ...) {
 			printf("%s:  %s", src, k);
@@ -31,6 +47,9 @@ main(int ac, char **av)
 			return FC_CONTINUE;
 		});
 
-	filecopy(opts, src, dst);
+	if (recursive)
+		treecopy(opts, src, dst);
+	else
+		filecopy(opts, src, dst);
 	return 0;
 }

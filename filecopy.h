@@ -196,6 +196,7 @@ extern const char *const fc_status_extattr_completion;
 // And now the big enchilada
 extern int filecopy(filecopy_options_t, const char *src, const char *dst);
 
+extern int treecopy(filecopy_options_t, const char *src, const char *dst);
 # ifdef __cplusplus
 //}
 # endif /* __cplusplus */

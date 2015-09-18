@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <err.h>
 #include <time.h>
+#include <fts.h>
 
 #ifdef __BLOCKS__
 # include <Block.h>
@@ -1613,12 +1614,102 @@ filecopy(filecopy_options_t o, const char *src, const char *dst)
 done:
 	if (opts->buffer)
 		free(opts->buffer);
-	close_files(opts);
+	if (opts->recursion == 0)
+		close_files(opts);
 	if (terror) {	// Indicates an error
 		if (opts->dst.flags & FLAG_CREATED)
 			(void)remove(dst);
 		errno = terror;
 		retval = -1;
 	}
+	return retval;
+}
+
+/*
+ * Copy a hierarchy.
+ * This is a different function, instead of an
+ * option, because I'm arrogant.
+ */
+int
+treecopy(filecopy_options_t options, const char *src, const char *dst)
+{
+	int retval = 0;
+	struct filecopy_options *opts = options;
+	FTS *fts = NULL;
+	FTSENT *entry;
+	int fts_options = 0;
+	char *paths[2] = { (char * const)src, NULL };
+	
+	if (opts == NULL)
+		goto done;
+
+	if (opts->follow)
+		fts_options |= FTS_COMFOLLOW | FTS_LOGICAL;
+	else
+		fts_options |= FTS_PHYSICAL;
+	
+	fts_options |= FTS_NOCHDIR;
+	fts_options |= FTS_NOSTAT;	// Should be a bit faster
+
+	fts = fts_open((char * const *)paths, fts_options, NULL);
+	if (fts) {
+		while ((entry = fts_read(fts)) != NULL) {
+			struct stat tstat;
+			struct filecopy_options tmp = *opts;
+			filecopy_status_t status;
+			tmp.recursion = 1;
+			char *new_dst;
+			int trv;
+			// Need to create the name for the destination.
+			// This will be dst + fts->fts_path
+			(void)asprintf(&new_dst, "%s/%s", dst, entry->fts_path);
+			if (new_dst == NULL) {
+				abort();
+			}
+			switch (entry->fts_info) {
+			case FTS_DOT:
+				continue;
+			case FTS_D:
+			case FTS_F:
+			case FTS_SL:
+			case FTS_SLNONE:
+			case FTS_DP:
+				break;
+			default:
+				warn("Unknown FTS type %d", entry->fts_info);
+				continue;
+			}
+			/*
+			 * For everything but a post-order directory,
+			 * call filecopy.  This will leave the files open,
+			 * so we can remove the uberace as desired.
+			 */
+			if (entry->fts_info != FTS_DP) {
+				trv = filecopy(&tmp, entry->fts_path, new_dst);
+				if (trv == -1) {
+					// Need to invoke an error handler
+					warn("Could not copy %s", entry->fts_path);
+					close_files(&tmp);
+					free(new_dst);
+					retval = -1;
+					goto done;
+				}
+			}
+			if (entry->fts_info != FTS_D) {
+				status = remove_uberace(&tmp.dst);
+				if (status != FC_CONTINUE) {
+					// Need to invoke an error handler
+					warn("Could not remove uberace from %s", tmp.dst.name);
+				}
+			}
+			close_files(&tmp);
+			free(new_dst);
+		}
+	}
+	
+done:
+	if (fts)
+		fts_close(fts);
+	
 	return retval;
 }
